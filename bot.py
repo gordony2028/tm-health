@@ -857,6 +857,10 @@ Be kind to yourself. You deserve comfort and care.
             logger.info("🌸 TM-Health Support Bot starting...")
             print("🌸 TM-Health Support Bot starting...")
             
+            # Start health check server in background thread
+            port = int(os.getenv('PORT', 10000))
+            self.start_health_server(port)
+            
             # Start the bot with proper error handling
             self.app.run_polling(
                 drop_pending_updates=True,
@@ -867,41 +871,41 @@ Be kind to yourself. You deserve comfort and care.
             logger.error(f"❌ Bot failed to start: {e}")
             print(f"❌ Bot failed to start: {e}")
             sys.exit(1)
-
-# Health check server for Render (simplified)
-async def health_check_server(port: int):
-    """Simple HTTP server for health checks"""
-    from aiohttp import web
     
-    async def health_check(request):
-        return web.Response(text='Teen Support Bot is running', status=200)
-    
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info(f"Health check server started on port {port}")
+    def start_health_server(self, port: int):
+        """Start simple health check server in background thread"""
+        import threading
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        
+        class HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'Teen Support Bot is running')
+            
+            def log_message(self, format, *args):
+                # Suppress HTTP server logs
+                pass
+        
+        def run_server():
+            try:
+                server = HTTPServer(('0.0.0.0', port), HealthHandler)
+                logger.info(f"✅ Health check server started on port {port}")
+                server.serve_forever()
+            except Exception as e:
+                logger.warning(f"⚠️ Health server failed: {e}")
+        
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
 
 # Main execution
-async def main():
-    """Main async function"""
+def main():
+    """Main function"""
     try:
         # Validate configuration
         config = TeenBotConfig()
         config.validate()
-        
-        # Start health check server
-        port = config.PORT
-        try:
-            import aiohttp
-            asyncio.create_task(health_check_server(port))
-            logger.info(f"✅ Health check server starting on port {port}")
-        except ImportError:
-            logger.warning("⚠️ aiohttp not available - health check server disabled")
         
         # Create and run bot
         bot = TeenSupportBot(
@@ -925,11 +929,4 @@ async def main():
         sys.exit(1)
 
 if __name__ == "__main__":
-    # Run the async main function
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("👋 Bot stopped")
-    except Exception as e:
-        print(f"❌ Failed to start bot: {e}")
-        sys.exit(1)
+    main()
