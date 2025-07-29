@@ -1151,7 +1151,127 @@ Would you like help finding services in your specific area?
         
         await update.message.reply_text(resources_msg, reply_markup=reply_markup)
 
-    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def mood_tracking(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Enhanced mood tracking with clinical metrics"""
+        mood_msg = """
+📊 **Professional Mood Tracking**
+
+Track your mental health symptoms using clinically validated scales. This helps identify patterns and measure progress over time.
+
+**What We'll Track:**
+• **Mood** (1-10 scale)
+• **Anxiety levels** 
+• **Depression indicators**
+• **Energy and sleep**
+• **Stress and triggers**
+• **Coping skills used**
+
+This takes about 3-5 minutes and helps both you and any mental health professionals understand your patterns.
+        """
+        
+        keyboard = [
+            [InlineKeyboardButton("📝 Quick Mood Check", callback_data="mood_quick")],
+            [InlineKeyboardButton("📋 Detailed Assessment", callback_data="mood_detailed")],
+            [InlineKeyboardButton("📈 View My Trends", callback_data="mood_trends")],
+            [InlineKeyboardButton("🎯 Set Tracking Goals", callback_data="mood_goals")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(mood_msg, reply_markup=reply_markup)
+
+    async def crisis_resources(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Immediate crisis resources"""
+        crisis_msg = """
+🆘 **Immediate Crisis Support - Australia**
+
+**If you're in immediate danger, call 000 now.**
+
+**24/7 Crisis Support:**
+📞 **Lifeline Australia: 13 11 14**
+   • Suicide prevention and crisis support
+   • Available 24/7, free and confidential
+
+🧒 **Kids Helpline: 1800 55 1800**
+   • For people aged 5-25 years
+   • Phone and online counseling 24/7
+
+💬 **Crisis Text Support:**
+   • Text **HELLO** to **0477 13 11 14**
+   • Available 6PM - midnight AEST
+
+🌐 **Beyond Blue: 1300 22 4636**
+   • Depression, anxiety, suicide prevention
+   • 24/7 support and information
+
+🌐 **Online Crisis Chat:**
+   • lifeline.org.au (click 'Crisis Chat')
+   • kidshelpline.com.au (web chat)
+
+**Remember:**
+• Crisis feelings are temporary
+• You don't have to face this alone
+• Professional help is available right now
+• Your life has value and meaning
+
+**If you're having thoughts of suicide or self-harm, please reach out to one of these services immediately.**
+
+How are you feeling right now? I'm here to support you. 💙
+        """
+        
+        keyboard = [
+            [InlineKeyboardButton("🚨 I need help right now", callback_data="crisis_immediate")],
+            [InlineKeyboardButton("📞 Text me the numbers", callback_data="crisis_numbers")],
+            [InlineKeyboardButton("🛡️ Create Safety Plan", callback_data="safety_start")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(crisis_msg, reply_markup=reply_markup)
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Professional help menu"""
+        help_msg = """
+🌟 **TM-Health Professional - Help Menu**
+
+**Core Commands:**
+/start - Welcome and professional introduction
+/help - Show this help menu
+
+**Clinical Tools:**
+/assess - Mental health screening (PHQ-A, GAD-7, risk assessment)
+/mood - Track mood and symptoms with clinical metrics
+/safety - Create personalized safety plan
+
+**Therapy Modules:**
+/cbt - Cognitive Behavioral Therapy tools and exercises
+/dbt - Dialectical Behavior Therapy skills training
+
+**Resources:**
+/crisis - Immediate crisis support and emergency numbers
+/professional - Find local mental health services and professionals
+
+**Features:**
+• **Evidence-based interventions** using CBT, DBT, ACT frameworks
+• **Clinical assessment tools** used by mental health professionals  
+• **Personalized safety planning** for crisis management
+• **Professional resource directory** for ongoing care
+• **Risk assessment and monitoring** for your safety
+
+**Professional Boundaries:**
+I provide evidence-based mental health support and coping skills, but I am NOT a replacement for:
+• Professional therapy or counseling
+• Psychiatric medication management  
+• Emergency crisis intervention
+• Medical or psychological diagnosis
+
+**If you're in crisis, please contact:**
+• Emergency services: 000
+• Lifeline: 13 11 14
+• Kids Helpline: 1800 55 1800
+
+Just message me anytime you want to talk - I'm here to provide professional-level support! 💙
+        """
+        
+        await update.message.reply_text(help_msg)
         """Handle button callbacks"""
         try:
             query = update.callback_query
@@ -1170,6 +1290,361 @@ Would you like help finding services in your specific area?
                 
         except Exception as e:
             logger.error(f"Error in button_callback: {e}")
+
+    async def handle_assessment_callback(self, query):
+        """Handle clinical assessment callbacks"""
+        if query.data == "assess_depression":
+            await query.edit_message_text(
+                """📋 **Depression Screening (PHQ-A)**
+
+This is a clinically validated tool used by mental health professionals to screen for depression in adolescents.
+
+**Instructions:** 
+Over the last 2 weeks, how often have you been bothered by the following problems?
+
+0 = Not at all
+1 = Several days  
+2 = More than half the days
+3 = Nearly every day
+
+Let's start with the first question:
+
+**Question 1 of 9:**
+"Little interest or pleasure in doing things"
+
+How would you rate this over the past 2 weeks?"""
+            )
+        elif query.data == "assess_anxiety":
+            await query.edit_message_text(
+                """📋 **Anxiety Screening (GAD-7)**
+
+This assessment helps identify symptoms of generalized anxiety disorder.
+
+**Instructions:**
+Over the last 2 weeks, how often have you been bothered by:
+
+0 = Not at all
+1 = Several days
+2 = More than half the days  
+3 = Nearly every day
+
+**Question 1 of 7:**
+"Feeling nervous, anxious, or on edge"
+
+How would you rate this over the past 2 weeks?"""
+            )
+        elif query.data == "assess_risk":
+            await query.edit_message_text(
+                """🛡️ **Risk Assessment**
+
+This confidential assessment helps ensure your safety and connect you with appropriate support if needed.
+
+**Important:** This information helps me provide better support and may indicate if professional help would be beneficial.
+
+**Question 1:**
+In the past month, have you had thoughts that you would be better off dead or of hurting yourself in some way?
+
+Please respond honestly - your safety is the priority."""
+            )
+        elif query.data == "assess_complete":
+            await query.edit_message_text(
+                """📊 **Complete Wellness Assessment**
+
+This comprehensive assessment combines multiple clinical tools:
+• Depression screening (PHQ-A)
+• Anxiety assessment (GAD-7)  
+• Risk evaluation
+• Functional assessment
+• Support system evaluation
+
+**Time required:** 10-15 minutes
+**Benefit:** Complete picture of your mental health
+
+This provides a thorough understanding of your current wellbeing and helps identify specific areas where support might be helpful.
+
+Ready to begin the complete assessment?"""
+            )
+
+    async def handle_safety_callback(self, query):
+        """Handle safety planning callbacks"""
+        if query.data == "safety_start":
+            await query.edit_message_text(
+                """🛡️ **Creating Your Personal Safety Plan**
+
+A safety plan is a written list of coping strategies and sources of support that you can use during a crisis. Let's build yours together.
+
+**Step 1: Warning Signs**
+What are the thoughts, feelings, or behaviors that let you know you might be entering a crisis?
+
+Examples:
+• "I start isolating from friends"
+• "I feel hopeless about the future"  
+• "I can't sleep or sleep too much"
+• "I have thoughts of hurting myself"
+
+What are YOUR personal warning signs? (Take your time to think about this)"""
+            )
+        elif query.data == "safety_view":
+            # In a real implementation, this would fetch from database
+            await query.edit_message_text(
+                """📋 **Your Current Safety Plan**
+
+*No safety plan found. Would you like to create one?*
+
+A personalized safety plan includes:
+• Your warning signs
+• Coping strategies that work for you
+• People you can contact for support
+• Professional emergency contacts
+• Ways to make your environment safer
+
+Creating a safety plan takes about 10-15 minutes and can be a lifesaving tool during difficult times."""
+            )
+
+    async def handle_cbt_callback(self, query):
+        """Handle CBT tool callbacks"""
+        if query.data == "cbt_thought_record":
+            await query.edit_message_text(
+                """💭 **Thought Record - CBT Tool**
+
+Thought records help you identify and challenge negative thinking patterns.
+
+**The CBT Triangle:** Thoughts ↔ Feelings ↔ Behaviors
+
+**Let's practice:**
+
+**Step 1: Identify the Situation**
+Think of a recent situation that upset you. Describe it briefly:
+"What happened?"
+
+**Step 2: Identify Your Emotions** 
+What emotions did you feel? Rate intensity 1-10:
+• Sad, angry, anxious, frustrated, etc.
+
+**Step 3: Identify Your Thoughts**
+What went through your mind in that moment?
+• "This always happens to me"
+• "I'm such a failure"
+• "Nothing ever goes right"
+
+Ready to try this with a recent situation?"""
+            )
+        elif query.data == "cbt_restructuring":
+            await query.edit_message_text(
+                """🔄 **Cognitive Restructuring**
+
+This technique helps you challenge and change unhelpful thinking patterns.
+
+**Common Thinking Traps:**
+• **All-or-Nothing:** "I'm either perfect or a failure"
+• **Mental Filter:** Focusing only on negatives
+• **Fortune Telling:** "I know this will go badly"
+• **Mind Reading:** "They think I'm stupid"
+• **Catastrophizing:** "This is the worst thing ever"
+
+**The Challenge Questions:**
+1. What evidence supports this thought?
+2. What evidence contradicts it?
+3. What would I tell a friend having this thought?
+4. What's a more balanced way to think about this?
+5. How helpful is this thought?
+
+**Try it now:** Think of a negative thought you've had recently and ask these questions."""
+            )
+        elif query.data == "cbt_activation":
+            await query.edit_message_text(
+                """📈 **Behavioral Activation**
+
+When we're depressed or anxious, we often stop doing activities we enjoy. This makes us feel worse, creating a negative cycle.
+
+**Activity Categories:**
+• **Mastery Activities:** Give sense of achievement (exercise, learning, organizing)
+• **Pleasure Activities:** Bring joy or satisfaction (music, art, time with friends)
+• **Necessary Activities:** Daily tasks (hygiene, meals, school)
+
+**Your Behavioral Activation Plan:**
+1. Choose ONE small activity from each category
+2. Schedule specific times to do them
+3. Rate your mood before and after (1-10)
+4. Notice the connection between activity and mood
+
+**This week, commit to:**
+• 1 mastery activity (15 minutes daily)
+• 1 pleasure activity (when feeling low)
+• Maintaining necessary activities
+
+What's one small pleasure activity you could do today?"""
+            )
+        elif query.data == "cbt_problem_solving":
+            await query.edit_message_text(
+                """🎯 **Structured Problem Solving**
+
+When problems feel overwhelming, breaking them down systematically helps.
+
+**The 6-Step Process:**
+
+**1. Define the Problem Clearly**
+• What exactly is the issue?
+• Be specific, not general
+
+**2. Brainstorm Solutions**  
+• List ALL possible options
+• Don't judge them yet
+
+**3. Evaluate Each Option**
+• Pros and cons of each
+• Feasibility and resources needed
+
+**4. Choose the Best Solution**
+• Consider your values and goals
+• Pick the most realistic option
+
+**5. Make an Action Plan**
+• Break into small steps
+• Set timeline and milestones
+
+**6. Implement and Review**
+• Try the solution
+• Evaluate and adjust if needed
+
+**Practice:** Think of a current problem and let's work through these steps together."""
+            )
+
+    async def handle_dbt_callback(self, query):
+        """Handle DBT skills callbacks"""
+        if query.data == "dbt_mindfulness":
+            await query.edit_message_text(
+                """🧘 **Mindfulness Skills**
+
+Mindfulness is about paying attention to the present moment without judgment.
+
+**Core Mindfulness Skills:**
+
+**OBSERVE:** Notice your thoughts, feelings, sensations
+• Like clouds passing in the sky
+• Don't try to change them, just notice
+
+**DESCRIBE:** Put words to what you observe
+• "I notice anxiety in my chest"
+• "I'm having the thought that..."
+
+**PARTICIPATE:** Engage fully in the present moment
+• Do one thing at a time
+• Throw yourself into the activity
+
+**Non-Judgmentally:** Drop the "good" and "bad" labels
+• Instead of "This is terrible," try "This is difficult"
+
+**One-Mindfully:** Focus on one thing at a time
+• When eating, just eat
+• When walking, just walk
+
+**Effectively:** Focus on what works
+• Do what's needed for your goals
+
+**Try this 5-minute mindfulness exercise:**
+1. Sit comfortably and close your eyes
+2. Notice 5 things you can hear
+3. Notice your breathing without changing it
+4. When your mind wanders, gently return to breath
+5. Open your eyes and notice how you feel"""
+            )
+        elif query.data == "dbt_distress":
+            await query.edit_message_text(
+                """💪 **Distress Tolerance Skills**
+
+These skills help you survive crisis situations without making them worse.
+
+**TIPP for Intense Emotions:**
+• **Temperature:** Cold water on face/hands (activates dive response)
+• **Intense Exercise:** 10 minutes to change body chemistry  
+• **Paced Breathing:** Exhale longer than inhale (4 in, 6 out)
+• **Paired Muscle Relaxation:** Tense and release muscle groups
+
+**Self-Soothing with 5 Senses:**
+• **See:** Beautiful pictures, nature, art
+• **Hear:** Calming music, nature sounds
+• **Smell:** Essential oils, baking, flowers
+• **Taste:** Tea, mint, favorite food
+• **Touch:** Soft blanket, warm bath, pet
+
+**Distraction - ACCEPTS:**
+• **Activities:** Puzzle, cleaning, hobby
+• **Contributing:** Help someone else
+• **Comparisons:** Remember harder times survived
+• **Emotions:** Watch comedy to shift mood
+• **Push away:** Set problem aside temporarily
+• **Thoughts:** Count, sing, recite poem
+• **Sensations:** Hold ice, smell strong scent
+
+**Try one TIPP skill right now - which feels most accessible?**"""
+            )
+        elif query.data == "dbt_emotion":
+            await query.edit_message_text(
+                """🎭 **Emotion Regulation Skills**
+
+Learn to understand and manage intense emotions effectively.
+
+**PLEASE Skills (Take Care of Your Body):**
+• **Treat PhysicaL illness:** See doctor when sick
+• **Balance Eating:** Regular, nutritious meals
+• **Avoid mood-Altering substances:** No drugs/alcohol
+• **Balance Sleep:** 7-9 hours nightly
+• **Get Exercise:** 20 minutes daily
+
+**Opposite Action:**
+When emotions don't fit the facts or are too intense:
+• **For Depression:** Do activities even when unmotivated
+• **For Anxiety:** Approach what you're avoiding (gradually)
+• **For Anger:** Be kind instead of aggressive
+• **For Shame:** Share with trusted person
+
+**Emotion Surfing:**
+• Emotions are like waves - they rise and fall
+• Intense emotions peak and decrease naturally
+• Ride the wave instead of fighting it
+• Remember: "This feeling will pass"
+
+**Check the Facts:**
+1. What is the emotion telling me?
+2. Does this emotion fit the facts?
+3. What would I do if this emotion was justified?
+4. What would I do if it wasn't?
+
+**Practice:** Identify one emotion you've felt strongly this week and try "opposite action" with it."""
+            )
+        elif query.data == "dbt_interpersonal":
+            await query.edit_message_text(
+                """🤝 **Interpersonal Effectiveness Skills**
+
+Build and maintain healthy relationships while respecting yourself and others.
+
+**DEAR MAN (Getting What You Want):**
+• **Describe:** the situation objectively
+• **Express:** your feelings and opinions
+• **Assert:** yourself by asking clearly for what you want
+• **Reinforce:** explain benefits of getting your request
+• **Mindful:** stay focused on your goal
+• **Appear confident:** use confident body language
+• **Negotiate:** be willing to compromise
+
+**GIVE (Maintaining Relationships):**
+• **Gentle:** be respectful and kind
+• **Interested:** listen and ask questions
+• **Validate:** acknowledge other person's feelings
+• **Easy manner:** smile, use humor when appropriate
+
+**FAST (Self-Respect):**
+• **Fair:** be fair to yourself and others
+• **no Apologies:** don't apologize for having needs
+• **Stick to values:** maintain your integrity
+• **Truthful:** be honest
+
+**Practice Scenario:**
+Think of a situation where you need to ask for something important. How would you use DEAR MAN?
+
+Example: Asking parents for more independence, requesting help from a friend, setting boundaries with someone."""
+            )
 
     async def handle_crisis_callback(self, query):
         """Handle crisis-related callbacks"""
