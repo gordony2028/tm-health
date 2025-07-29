@@ -568,13 +568,16 @@ Remember: You provide professional-level support but are NOT a replacement for i
     async def generate_professional_response(self, message: str, user_context: Dict) -> Tuple[str, Dict]:
         """Generate professional mental health response with clinical assessment"""
         
-        # First, conduct risk assessment
+        # Get teen info first
+        teen = user_context.get('teen')
+        recent_moods = user_context.get('recent_moods', [])
+        
+        # Conduct risk assessment
         risk_assessment = self.assess_risk(message, user_context)
         
         if not self.enabled:
             return self.professional_fallback_response(message, user_context, risk_assessment)
         
-        teen = user_context.get('teen')
         clinical_history = user_context.get('clinical_history', {})
         
         # Build comprehensive clinical context
@@ -930,12 +933,15 @@ How are you feeling today? I'm here to provide professional-level support. 💙
             user_id = update.effective_user.id
             message_text = update.message.text
             
+            logger.info(f"Processing message from user {user_id}: {message_text[:50]}...")
+            
             teen = self.db.get_or_create_teen(update.effective_user)
             
             # Check if user is in the middle of an assessment or other process
             conversation_state = self.db.get_conversation_state(user_id)
             
             if conversation_state:
+                logger.info(f"User {user_id} in {conversation_state.state_type} state")
                 # Route to appropriate handler based on state
                 if conversation_state.state_type == 'assessment':
                     await self.handle_assessment_response(update, conversation_state)
@@ -946,27 +952,33 @@ How are you feeling today? I'm here to provide professional-level support. 💙
                 # Add other state handlers as needed
             
             # Normal message processing (no active assessment)
+            logger.info(f"Getting clinical context for user {user_id}")
             user_context = self.get_clinical_context(user_id)
             
             # Crisis detection
+            logger.info(f"Checking for crisis indicators in message")
             if self.ai_coach.detect_crisis(message_text):
+                logger.warning(f"Crisis detected for user {user_id}")
                 await self.handle_crisis(update, message_text)
                 return
             
             # Generate professional response with risk assessment
+            logger.info(f"Generating professional response for user {user_id}")
             response, risk_assessment = await self.ai_coach.generate_professional_response(message_text, user_context)
             
             # Log clinical interaction
+            logger.info(f"Logging clinical interaction for user {user_id}")
             self.log_clinical_interaction(user_id, message_text, response, risk_assessment)
             
             # Update user risk level if needed
             if risk_assessment['level'] != RiskLevel.LOW.value:
+                logger.info(f"Updating risk level for user {user_id} to {risk_assessment['level']}")
                 self.update_user_risk_level(user_id, risk_assessment)
             
             await update.message.reply_text(response)
             
             # Provide appropriate follow-up buttons based on risk
-            if risk_assessment['immediate_action_required']:
+            if risk_assessment.get('immediate_action_required', False):
                 keyboard = [
                     [InlineKeyboardButton("🚨 I need immediate help", callback_data="crisis_immediate")],
                     [InlineKeyboardButton("📞 Show me crisis numbers", callback_data="crisis_numbers")]
@@ -974,11 +986,17 @@ How are you feeling today? I'm here to provide professional-level support. 💙
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await update.message.reply_text("Please confirm you'll get immediate help:", reply_markup=reply_markup)
             
-            logger.info(f"Professional message handled for user {user_id}, risk level: {risk_assessment['level']}")
+            logger.info(f"Successfully handled message for user {user_id}, risk level: {risk_assessment['level']}")
             
         except Exception as e:
-            logger.error(f"Error in handle_message: {e}")
-            await update.message.reply_text("I'm having a technical issue. If this is urgent, please call Lifeline: 13 11 14")
+            logger.error(f"Error in handle_message for user {update.effective_user.id}: {e}", exc_info=True)
+            await update.message.reply_text(
+                "I'm having a technical issue right now. If this is urgent, please call:\n\n"
+                "🆘 Lifeline: 13 11 14\n"
+                "🧒 Kids Helpline: 1800 55 1800\n"
+                "🚨 Emergency: 000\n\n"
+                "Please try again in a moment."
+            )
     
     async def handle_assessment_response(self, update: Update, conversation_state):
         """Handle responses during active assessments"""
