@@ -529,7 +529,7 @@ Remember: You provide professional-level support but are NOT a replacement for i
 - Risk Level: {teen.risk_level if teen else 'Not assessed'}
 - Primary Concerns: {teen.primary_concerns if teen else 'Not identified'}
 - Therapy Status: {teen.therapy_status if teen else 'Unknown'}
-- Support Network: {teen.support_network_strength}/10 if teen else 'Not assessed'}
+- Support Network: {teen.support_network_strength if teen else 'Not assessed'}/10
 
 ## Current Risk Assessment:
 - Risk Level: {risk_assessment['level']}
