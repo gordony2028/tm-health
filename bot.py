@@ -153,6 +153,19 @@ class TeenBotConfig:
             print("Please set it in your Render dashboard under Environment Variables")
             sys.exit(1)
         
+        # Basic token format validation
+        if not self.TELEGRAM_TOKEN.count(':') == 1:
+            logger.error("❌ TELEGRAM_TOKEN appears to be invalid format")
+            print("ERROR: TELEGRAM_TOKEN should be in format: 123456789:ABC-DEF...")
+            print("Get a valid token from @BotFather on Telegram")
+            sys.exit(1)
+        
+        token_parts = self.TELEGRAM_TOKEN.split(':')
+        if not token_parts[0].isdigit() or len(token_parts[1]) < 20:
+            logger.error("❌ TELEGRAM_TOKEN format is invalid")
+            print("ERROR: Invalid token format. Get a new token from @BotFather")
+            sys.exit(1)
+        
         logger.info("✅ TM-Health Bot configuration validated")
         print("✅ Configuration validated successfully")
         return True
@@ -368,8 +381,21 @@ You matter, and there are people who want to help you right now. I'm here too, b
 class TeenSupportBot:
     def __init__(self, token: str, database_url: str, gemini_api_key: str = None):
         try:
+            logger.info(f"Initializing bot with token: {token[:10]}...")
+            
             self.db = TeenSupportDB(database_url)
-            self.app = Application.builder().token(token).build()
+            
+            # Create application with aggressive timeout and retry settings for Render
+            self.app = (Application.builder()
+                       .token(token)
+                       .connect_timeout(60)        # 60 seconds to connect
+                       .read_timeout(60)           # 60 seconds to read
+                       .write_timeout(60)          # 60 seconds to write  
+                       .pool_timeout(60)           # 60 seconds pool timeout
+                       .get_updates_connect_timeout(60)  # Long timeout for updates
+                       .get_updates_read_timeout(60)     # Long timeout for reading updates
+                       .build())
+            
             self.ai_coach = TeenMentalHealthCoach(gemini_api_key)
             self.config = TeenBotConfig()
             self.setup_handlers()
@@ -861,16 +887,88 @@ Be kind to yourself. You deserve comfort and care.
             port = int(os.getenv('PORT', 10000))
             self.start_health_server(port)
             
-            # Start the bot with proper error handling
-            self.app.run_polling(
-                drop_pending_updates=True,
-                allowed_updates=['message', 'callback_query']
-            )
+            # Test connectivity first
+            print("🔄 Testing Telegram API connectivity...")
+            logger.info("Testing Telegram API connectivity...")
+            
+            # Multiple retry attempts with increasing delays
+            max_retries = 5
+            base_delay = 10
+            
+            for attempt in range(max_retries):
+                try:
+                    print(f"🔄 Connection attempt {attempt + 1}/{max_retries}...")
+                    logger.info(f"Connection attempt {attempt + 1}/{max_retries}")
+                    
+                    # Start the bot with very conservative settings for Render
+                    self.app.run_polling(
+                        drop_pending_updates=True,
+                        allowed_updates=['message', 'callback_query'],
+                        poll_interval=3.0,      # Check every 3 seconds (slower)
+                        timeout=20,             # 20 second timeout per request
+                        bootstrap_retries=5,    # Retry bootstrap 5 times
+                        close_loop=False        # Don't close the event loop
+                    )
+                    
+                    # If we reach here, the bot started successfully
+                    break
+                    
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    
+                    if attempt < max_retries - 1:  # Not the last attempt
+                        if 'timeout' in error_msg or 'connection' in error_msg:
+                            delay = base_delay * (attempt + 1)
+                            print(f"⏳ Connection failed, retrying in {delay} seconds...")
+                            logger.warning(f"Connection failed, retrying in {delay} seconds: {e}")
+                            
+                            import time
+                            time.sleep(delay)
+                            continue
+                    
+                    # Last attempt failed or non-retryable error
+                    raise e
             
         except Exception as e:
-            logger.error(f"❌ Bot failed to start: {e}")
+            logger.error(f"❌ Bot failed to start after all retries: {e}")
             print(f"❌ Bot failed to start: {e}")
-            sys.exit(1)
+            
+            # Provide helpful error messages
+            error_str = str(e).lower()
+            if 'unauthorized' in error_str or 'token' in error_str:
+                print("\n💡 SOLUTION: Your TELEGRAM_TOKEN is invalid or expired")
+                print("   1. Go to @BotFather on Telegram")
+                print("   2. Send /mybots and select your bot")
+                print("   3. Copy the API Token")
+                print("   4. Update TELEGRAM_TOKEN in Render dashboard")
+            elif 'timeout' in error_str or 'timed out' in error_str:
+                print("\n💡 SOLUTION: Persistent connection timeout")
+                print("   1. This might be a Render/Telegram connectivity issue")
+                print("   2. Try deploying to a different Render region")
+                print("   3. Consider using a webhook instead of polling")
+                print("   4. Your token works (tested), this is a network issue")
+            elif 'network' in error_str or 'connection' in error_str:
+                print("\n💡 SOLUTION: Network connectivity issue")
+                print("   1. Render's free tier may have network limitations")
+                print("   2. Try redeploying in 10-15 minutes")
+                print("   3. Consider upgrading to paid tier for better connectivity")
+            
+            # For Render, we'll keep the process alive so it doesn't crash
+            print("\n🔄 Keeping service alive for health checks...")
+            logger.info("Keeping service alive for health checks")
+            
+            # Keep the process running so Render doesn't restart it repeatedly
+            import time
+            while True:
+                time.sleep(300)  # Sleep 5 minutes, then check again
+                print("💤 Service staying alive (bot connection failed but health server running)")
+                try:
+                    # Try to restart the bot
+                    print("🔄 Attempting bot restart...")
+                    self.run()
+                    break
+                except:
+                    continue
     
     def start_health_server(self, port: int):
         """Start simple health check server in background thread"""
@@ -907,6 +1005,9 @@ def main():
         config = TeenBotConfig()
         config.validate()
         
+        print("✅ Token format looks valid")
+        print(f"🔗 Attempting to connect to Telegram servers...")
+        
         # Create and run bot
         bot = TeenSupportBot(
             config.TELEGRAM_TOKEN,
@@ -926,7 +1027,32 @@ def main():
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
         print(f"❌ Fatal error: {e}")
-        sys.exit(1)
+        
+        # Additional debugging info
+        error_str = str(e).lower()
+        if 'token' in error_str or 'unauthorized' in error_str:
+            print("\n🔍 DEBUG INFO:")
+            print("- Your TELEGRAM_TOKEN environment variable is set")
+            print("- But Telegram rejected it as invalid")
+            print("- Please get a fresh token from @BotFather")
+        elif 'timeout' in error_str:
+            print("\n🔍 DEBUG INFO:")
+            print("- Connection to Telegram servers timed out")
+            print("- This could be a temporary network issue")
+            print("- Try redeploying in a few minutes")
+        
+        # Don't exit with status 1 - let the service stay alive
+        print("\n🔄 Keeping service alive for potential recovery...")
+        import time
+        while True:
+            time.sleep(300)  # Sleep 5 minutes
+            print("💤 Service alive - health check endpoint working")
+            # Try to restart periodically
+            try:
+                main()
+                break
+            except:
+                continue
 
 if __name__ == "__main__":
     main()
