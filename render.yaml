@@ -3,7 +3,7 @@ services:
     name: tm-health
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python tm_health_bot.py
+    startCommand: python bot.py
     envVars:
       - key: TELEGRAM_TOKEN
         sync: false
@@ -17,3 +17,4 @@ services:
     plan: free
     region: ohio
     autoDeploy: true
+    healthCheckPath: /health

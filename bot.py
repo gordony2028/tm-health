@@ -1,5 +1,6 @@
 # TM-Health - Teen Mental Health Support Bot
-# Focus: Emotional support, coping strategies, and connection to professional help
+# Fixed for Render deployment
+# File: bot.py
 
 import os
 import json
@@ -8,23 +9,50 @@ import signal
 import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+import asyncio
 
+# Set up logging first
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Try to import optional dependencies with better error handling
 try:
     import google.generativeai as genai
     GEMINI_AVAILABLE = True
+    logger.info("✅ Google Generative AI available")
 except ImportError as e:
-    print(f"⚠️ Google Generative AI not available: {e}")
+    logger.warning(f"⚠️ Google Generative AI not available: {e}")
     GEMINI_AVAILABLE = False
     genai = None
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean, Float, BigInteger
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-import asyncio
+try:
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+    logger.info("✅ Telegram bot library imported")
+except ImportError as e:
+    logger.error(f"❌ Failed to import telegram library: {e}")
+    sys.exit(1)
+
+try:
+    from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean, Float, BigInteger
+    from sqlalchemy.ext.declarative import declarative_base
+    from sqlalchemy.orm import sessionmaker, Session
+    logger.info("✅ SQLAlchemy imported")
+except ImportError as e:
+    logger.error(f"❌ Failed to import SQLAlchemy: {e}")
+    sys.exit(1)
+
+try:
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    logger.info("✅ APScheduler imported")
+except ImportError as e:
+    logger.warning(f"⚠️ APScheduler not available: {e}")
+    AsyncIOScheduler = None
+    CronTrigger = None
 
 # Database Models for Teen Support
 Base = declarative_base()
@@ -115,25 +143,36 @@ class TeenBotConfig:
                 'mensline': '1300 78 99 78',
                 'suicide_callback': '1300 659 467',
                 'crisis_text': 'Text HELLO to 0477 13 11 14'
-            },
-            'INTERNATIONAL': {
-                'resources': 'https://www.iasp.info/resources/Crisis_Centres/'
             }
         }
     
     def validate(self):
         if not self.TELEGRAM_TOKEN:
-            print("❌ TELEGRAM_TOKEN not found")
+            logger.error("❌ TELEGRAM_TOKEN environment variable not found")
+            print("ERROR: TELEGRAM_TOKEN environment variable is required")
+            print("Please set it in your Render dashboard under Environment Variables")
             sys.exit(1)
-        print("✅ TM-Health Bot configuration validated")
+        
+        logger.info("✅ TM-Health Bot configuration validated")
+        print("✅ Configuration validated successfully")
         return True
 
-# Database Setup
+# Database Setup with better error handling
 class TeenSupportDB:
     def __init__(self, database_url: str):
-        self.engine = create_engine(database_url, pool_pre_ping=True, pool_recycle=300)
-        Base.metadata.create_all(self.engine)
-        self.SessionLocal = sessionmaker(bind=self.engine)
+        try:
+            self.engine = create_engine(
+                database_url, 
+                pool_pre_ping=True, 
+                pool_recycle=300,
+                echo=False  # Disable SQL logging for cleaner output
+            )
+            Base.metadata.create_all(self.engine)
+            self.SessionLocal = sessionmaker(bind=self.engine)
+            logger.info("✅ Database initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Database initialization failed: {e}")
+            raise
     
     def get_session(self) -> Session:
         return self.SessionLocal()
@@ -151,10 +190,15 @@ class TeenSupportDB:
                 session.add(teen)
                 session.commit()
                 session.refresh(teen)
+                logger.info(f"Created new teen user: {telegram_user.id}")
             else:
                 teen.last_active = datetime.utcnow()
                 session.commit()
             return teen
+        except Exception as e:
+            logger.error(f"Error in get_or_create_teen: {e}")
+            session.rollback()
+            raise
         finally:
             session.close()
 
@@ -163,6 +207,8 @@ class TeenMentalHealthCoach:
     def __init__(self, api_key: str = None):
         self.api_key = api_key
         self.enabled = False
+        self.model = None
+        self.model_name = None
         
         if GEMINI_AVAILABLE and api_key:
             try:
@@ -173,17 +219,27 @@ class TeenMentalHealthCoach:
                 for model_name in model_names:
                     try:
                         self.model = genai.GenerativeModel(model_name)
+                        # Test with a simple prompt
                         test_response = self.model.generate_content("Say 'ready to help teens'")
                         if test_response and test_response.text:
                             self.enabled = True
                             self.model_name = model_name
-                            print(f"✅ Teen Mental Health AI enabled with {model_name}")
+                            logger.info(f"✅ Teen Mental Health AI enabled with {model_name}")
                             break
                     except Exception as e:
+                        logger.warning(f"Failed to initialize {model_name}: {e}")
                         continue
                         
+                if not self.enabled:
+                    logger.warning("⚠️ Could not initialize any Gemini model")
+                        
             except Exception as e:
-                print(f"❌ Teen Mental Health AI initialization failed: {e}")
+                logger.warning(f"⚠️ Teen Mental Health AI initialization failed: {e}")
+        else:
+            if not GEMINI_AVAILABLE:
+                logger.warning("⚠️ Gemini not available - using fallback responses")
+            if not api_key:
+                logger.warning("⚠️ No Gemini API key - using fallback responses")
         
         self.load_therapeutic_prompts()
     
@@ -207,50 +263,6 @@ You are a compassionate, evidence-based mental health support companion for teen
 
 **Boundaries**: You are a support tool, not a replacement for therapy, medication, or professional mental health care.
 
-## Communication Style
-
-- **Empathetic and warm** but not overly casual
-- **Validate their feelings** - teens' emotions are real and important
-- **Use their language** - understand teen slang and concerns
-- **Be patient** - teens may need time to open up
-- **Encourage agency** - help them find their own solutions when possible
-
-## Core Therapeutic Techniques
-
-### Cognitive Behavioral Therapy (CBT) for Teens
-- Help identify negative thought patterns
-- Teach thought challenging techniques
-- Connect thoughts, feelings, and behaviors
-- Use teen-relevant examples
-
-### Dialectical Behavior Therapy (DBT) Skills
-- **Distress Tolerance**: TIPP, self-soothing, distraction
-- **Emotion Regulation**: PLEASE skills, opposite action
-- **Mindfulness**: 5-4-3-2-1 grounding, breathing exercises
-- **Interpersonal Effectiveness**: DEAR MAN for communication
-
-### Positive Psychology
-- Strengths identification
-- Gratitude practices (teen-appropriate)
-- Meaning-making and purpose
-- Growth mindset
-
-## Crisis Response Protocol
-
-If you detect ANY of these, immediately respond with crisis resources:
-- Suicidal ideation or planning
-- Self-harm statements
-- Expressions of hopelessness with intent
-- Severe emotional distress
-
-Crisis Response Format:
-"I'm really concerned about you right now. Your safety is the most important thing. Please reach out for immediate help:
-- Crisis Text Line: Text HOME to 741741
-- National Suicide Prevention Lifeline: 988
-- Or go to your nearest emergency room
-
-You matter, and there are people who want to help you right now."
-
 ## Response Guidelines
 
 ### Always Include:
@@ -259,31 +271,7 @@ You matter, and there are people who want to help you right now."
 - Encouragement about their strength/resilience
 - Question to keep conversation going (if appropriate)
 
-### Never Do:
-- Give medical advice or diagnose
-- Minimize their problems ("it's just a phase")
-- Share personal information
-- Make promises you can't keep
-- Rush to "fix" everything
-
-### Encourage Professional Help When:
-- Symptoms interfere with daily functioning
-- Persistent mood changes lasting weeks
-- Substance use concerns
-- Trauma disclosure
-- Family crisis situations
-
-## Teen-Specific Considerations
-
-**School Stress**: Understand academic pressure, social dynamics, bullying, college prep anxiety
-**Identity Development**: Support exploration of identity, sexuality, values, independence
-**Social Media**: Address cyberbullying, comparison, FOMO, digital wellness
-**Family Issues**: Navigate parent-teen conflicts, divorce, family mental health
-**Peer Relationships**: Friendship drama, romantic relationships, social anxiety
-**Body Image**: Address eating concerns, body dysmorphia, sports pressure
-**Substance Use**: Provide education and harm reduction information
-
-Remember: You are a supportive companion on their mental health journey, not their therapist. Your role is to provide coping skills, emotional support, and connection to professional resources when needed.
+### Keep responses under 200 words and teen-friendly.
         """
     
     async def generate_teen_response(self, message: str, user_context: Dict) -> str:
@@ -294,7 +282,6 @@ Remember: You are a supportive companion on their mental health journey, not the
         
         teen = user_context.get('teen')
         recent_moods = user_context.get('recent_moods', [])
-        session_history = user_context.get('recent_sessions', [])
         
         # Build context for teen
         context_summary = f"""
@@ -309,7 +296,7 @@ Remember: You are a supportive companion on their mental health journey, not the
         
         if recent_moods:
             for mood in recent_moods[:3]:
-                context_summary += f"- Mood: {mood.mood_score}/10, Stress: {mood.stress_level}/10, Energy: {mood.energy_level}/10\n"
+                context_summary += f"- Mood: {mood.mood_score}/10, Stress: {mood.stress_level}/10\n"
         else:
             context_summary += "- No recent mood data\n"
         
@@ -320,22 +307,14 @@ Remember: You are a supportive companion on their mental health journey, not the
 
 ## Teen's Message: "{message}"
 
-## Your Response Guidelines:
-1. First, assess if this is a crisis situation requiring immediate resources
-2. Validate their feelings and experience
-3. Provide practical coping strategy or emotional support
-4. Use age-appropriate language and examples
-5. End with engagement (question or gentle encouragement)
-6. Keep response under 200 words
-
-Provide a supportive, therapeutic response:
+Provide a supportive, therapeutic response under 200 words:
         """
         
         try:
             response = await asyncio.to_thread(self.model.generate_content, full_prompt)
             return response.text.strip() if response and response.text else self.fallback_teen_response(message, user_context)
         except Exception as e:
-            print(f"Teen Mental Health AI error: {e}")
+            logger.warning(f"AI response generation failed: {e}")
             return self.fallback_teen_response(message, user_context)
     
     def fallback_teen_response(self, message: str, user_context: Dict) -> str:
@@ -388,12 +367,17 @@ You matter, and there are people who want to help you right now. I'm here too, b
 # Main Teen Support Bot
 class TeenSupportBot:
     def __init__(self, token: str, database_url: str, gemini_api_key: str = None):
-        self.db = TeenSupportDB(database_url)
-        self.app = Application.builder().token(token).build()
-        self.ai_coach = TeenMentalHealthCoach(gemini_api_key)
-        self.config = TeenBotConfig()
-        self.setup_handlers()
-        self.setup_scheduler()
+        try:
+            self.db = TeenSupportDB(database_url)
+            self.app = Application.builder().token(token).build()
+            self.ai_coach = TeenMentalHealthCoach(gemini_api_key)
+            self.config = TeenBotConfig()
+            self.setup_handlers()
+            self.setup_scheduler()
+            logger.info("✅ TeenSupportBot initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize TeenSupportBot: {e}")
+            raise
     
     def setup_handlers(self):
         # Commands
@@ -402,27 +386,36 @@ class TeenSupportBot:
         self.app.add_handler(CommandHandler("breathe", self.breathing_exercise))
         self.app.add_handler(CommandHandler("skills", self.coping_skills))
         self.app.add_handler(CommandHandler("crisis", self.crisis_resources))
-        self.app.add_handler(CommandHandler("about", self.about_me))
-        self.app.add_handler(CommandHandler("privacy", self.privacy_info))
+        self.app.add_handler(CommandHandler("help", self.help_command))
         
         # Message handlers
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         self.app.add_handler(CallbackQueryHandler(self.button_callback))
+        
+        logger.info("✅ Bot handlers set up successfully")
     
     def setup_scheduler(self):
-        # Daily mood check reminders
-        scheduler = AsyncIOScheduler()
-        scheduler.add_job(
-            self.daily_mood_reminder,
-            CronTrigger(hour=19, minute=0),  # 7 PM daily
-            id='mood_reminder'
-        )
-        scheduler.start()
+        # Only set up scheduler if APScheduler is available
+        if AsyncIOScheduler and CronTrigger:
+            try:
+                self.scheduler = AsyncIOScheduler()
+                self.scheduler.add_job(
+                    self.daily_mood_reminder,
+                    CronTrigger(hour=19, minute=0),  # 7 PM daily
+                    id='mood_reminder'
+                )
+                self.scheduler.start()
+                logger.info("✅ Scheduler set up successfully")
+            except Exception as e:
+                logger.warning(f"⚠️ Scheduler setup failed: {e}")
+        else:
+            logger.warning("⚠️ Scheduler not available - mood reminders disabled")
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        teen = self.db.get_or_create_teen(update.effective_user)
-        
-        welcome_msg = f"""
+        try:
+            teen = self.db.get_or_create_teen(update.effective_user)
+            
+            welcome_msg = f"""
 Hi {teen.first_name}! 🌟 I'm TM-Health, your personal mental health support companion.
 
 **What I'm here for:**
@@ -439,35 +432,65 @@ Hi {teen.first_name}! 🌟 I'm TM-Health, your personal mental health support co
 /breathe - Guided breathing exercise
 /skills - Learn coping strategies
 /crisis - Emergency resources
-/about - Tell me about yourself
+/help - Show all commands
 
 What's on your mind today? I'm here to listen. 💙
+            """
+            
+            await update.message.reply_text(welcome_msg)
+            logger.info(f"Start command executed for user {update.effective_user.id}")
+        except Exception as e:
+            logger.error(f"Error in start_command: {e}")
+            await update.message.reply_text("Sorry, I encountered an error. Please try again.")
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        help_msg = """
+🌟 **TM-Health Commands**
+
+/start - Welcome and introduction
+/mood - Quick mood check-in
+/breathe - Guided breathing exercise
+/skills - Learn coping strategies
+/crisis - Emergency resources and helplines
+/help - Show this help menu
+
+**Remember:** I'm here to support you, but if you're in crisis, please reach out to professional help immediately:
+• Lifeline: 13 11 14
+• Kids Helpline: 1800 55 1800
+• Emergency: 000
+
+Just send me a message anytime you want to talk! 💙
         """
-        
-        await update.message.reply_text(welcome_msg)
+        await update.message.reply_text(help_msg)
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        message_text = update.message.text
-        
-        # Ensure teen exists in database
-        teen = self.db.get_or_create_teen(update.effective_user)
-        
-        # Get user context for AI
-        user_context = self.get_teen_context(user_id)
-        
-        # Crisis detection
-        if self.ai_coach.detect_crisis(message_text):
-            await self.handle_crisis(update, message_text)
-            return
-        
-        # Generate supportive response
-        response = await self.ai_coach.generate_teen_response(message_text, user_context)
-        
-        # Log conversation
-        self.log_conversation(user_id, message_text, response)
-        
-        await update.message.reply_text(response)
+        try:
+            user_id = update.effective_user.id
+            message_text = update.message.text
+            
+            # Ensure teen exists in database
+            teen = self.db.get_or_create_teen(update.effective_user)
+            
+            # Get user context for AI
+            user_context = self.get_teen_context(user_id)
+            
+            # Crisis detection
+            if self.ai_coach.detect_crisis(message_text):
+                await self.handle_crisis(update, message_text)
+                return
+            
+            # Generate supportive response
+            response = await self.ai_coach.generate_teen_response(message_text, user_context)
+            
+            # Log conversation
+            self.log_conversation(user_id, message_text, response)
+            
+            await update.message.reply_text(response)
+            logger.info(f"Message handled for user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Error in handle_message: {e}")
+            await update.message.reply_text("I'm having trouble processing your message right now. Please try again or use /help for commands.")
     
     def get_teen_context(self, user_id: int) -> Dict:
         session = self.db.get_session()
@@ -486,6 +509,9 @@ What's on your mind today? I'm here to listen. 💙
                 'recent_moods': recent_moods,
                 'recent_sessions': recent_sessions
             }
+        except Exception as e:
+            logger.error(f"Error getting teen context: {e}")
+            return {'teen': None, 'recent_moods': [], 'recent_sessions': []}
         finally:
             session.close()
     
@@ -507,6 +533,9 @@ What's on your mind today? I'm here to listen. 💙
                 teen.total_conversations = (teen.total_conversations or 0) + 1
             
             session.commit()
+        except Exception as e:
+            logger.error(f"Error logging conversation: {e}")
+            session.rollback()
         finally:
             session.close()
     
@@ -529,7 +558,7 @@ What's on your mind today? I'm here to listen. 💙
         """Classify the type of support provided"""
         response_lower = response.lower()
         
-        if 'crisis' in response_lower or '988' in response_lower:
+        if 'crisis' in response_lower or '13 11 14' in response_lower:
             return 'crisis_intervention'
         elif any(word in response_lower for word in ['breathing', 'grounding', 'mindfulness']):
             return 'coping_skills'
@@ -542,23 +571,24 @@ What's on your mind today? I'm here to listen. 💙
     
     async def handle_crisis(self, update: Update, message: str):
         """Handle crisis situations with immediate resources"""
-        user_id = update.effective_user.id
-        
-        # Log crisis alert
-        session = self.db.get_session()
         try:
-            alert = CrisisAlert(
-                user_id=user_id,
-                alert_type='crisis_detected',
-                message_content=message,
-                response_provided='crisis_resources_sent'
-            )
-            session.add(alert)
-            session.commit()
-        finally:
-            session.close()
-        
-        crisis_msg = """
+            user_id = update.effective_user.id
+            
+            # Log crisis alert
+            session = self.db.get_session()
+            try:
+                alert = CrisisAlert(
+                    user_id=user_id,
+                    alert_type='crisis_detected',
+                    message_content=message,
+                    response_provided='crisis_resources_sent'
+                )
+                session.add(alert)
+                session.commit()
+            finally:
+                session.close()
+            
+            crisis_msg = """
 🚨 **I'm really concerned about you right now. Your safety is the most important thing.**
 
 **Please reach out for immediate help:**
@@ -576,11 +606,14 @@ What's on your mind today? I'm here to listen. 💙
 **You matter. You are valued. There are people who want to help you.**
 
 I'm here too, but please get professional support right now. Your life has meaning and things can get better. 💙
-
-Would you like me to help you think of a trusted adult you could reach out to?
-        """
-        
-        await update.message.reply_text(crisis_msg)
+            """
+            
+            await update.message.reply_text(crisis_msg)
+            logger.warning(f"Crisis situation detected and handled for user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Error handling crisis: {e}")
+            await update.message.reply_text("Please call 000 or 13 11 14 immediately if you're in crisis.")
     
     async def mood_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Quick mood check-in"""
@@ -669,11 +702,6 @@ How do you feel after the breathing exercise?
    • Call: **1300 78 99 78**
    • Available 24/7
 
-🌐 **Online Chat**
-   • lifeline.org.au
-   • beyondblue.org.au
-   • kidshelpline.com.au
-
 **Remember:**
 • You matter and your life has value
 • Crisis feelings are temporary
@@ -689,51 +717,64 @@ How are you feeling right now? I'm here to support you. 💙
     
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle button callbacks"""
-        query = update.callback_query
-        await query.answer()
-        
-        if query.data.startswith("mood_"):
-            mood_level = query.data.replace("mood_", "")
-            await self.process_mood_entry(query, mood_level)
-        elif query.data.startswith("skill_"):
-            skill_type = query.data.replace("skill_", "")
-            await self.provide_coping_skill(query, skill_type)
+        try:
+            query = update.callback_query
+            await query.answer()
+            
+            if query.data.startswith("mood_"):
+                mood_level = query.data.replace("mood_", "")
+                await self.process_mood_entry(query, mood_level)
+            elif query.data.startswith("skill_"):
+                skill_type = query.data.replace("skill_", "")
+                await self.provide_coping_skill(query, skill_type)
+        except Exception as e:
+            logger.error(f"Error in button_callback: {e}")
     
     async def process_mood_entry(self, query, mood_level: str):
         """Process mood check-in response"""
-        user_id = query.from_user.id
-        
-        mood_scores = {
-            'great': 9, 'good': 6, 'okay': 4, 'bad': 2, 'crisis': 1
-        }
-        
-        mood_score = mood_scores.get(mood_level, 5)
-        
-        # Save mood to database
-        session = self.db.get_session()
         try:
-            mood_entry = MoodEntry(
-                user_id=user_id,
-                mood_score=mood_score
-            )
-            session.add(mood_entry)
-            session.commit()
-        finally:
-            session.close()
-        
-        if mood_level == 'crisis':
-            await query.edit_message_text(
-                "I'm concerned about you. Let's get you some immediate support."
-            )
-            await self.handle_crisis(query, "mood check indicates crisis")
-        elif mood_level in ['bad', 'okay']:
-            await query.edit_message_text(
-                f"Thanks for checking in. I hear that you're struggling right now. That takes courage to share. Would you like to try a coping skill or just talk about what's going on? 💙"
-            )
-        else:
-            await query.edit_message_text(
-                f"I'm glad to hear you're doing {mood_level}! Thanks for checking in. What's been going well for you today? 🌟"
-            )
+            user_id = query.from_user.id
+            
+            mood_scores = {
+                'great': 9, 'good': 6, 'okay': 4, 'bad': 2, 'crisis': 1
+            }
+            
+            mood_score = mood_scores.get(mood_level, 5)
+            
+            # Save mood to database
+            session = self.db.get_session()
+            try:
+                mood_entry = MoodEntry(
+                    user_id=user_id,
+                    mood_score=mood_score
+                )
+                session.add(mood_entry)
+                session.commit()
+            finally:
+                session.close()
+            
+            if mood_level == 'crisis':
+                await query.edit_message_text(
+                    "I'm concerned about you. Let's get you some immediate support."
+                )
+                # Create a fake update object for crisis handling
+                class FakeUpdate:
+                    def __init__(self, query):
+                        self.message = query.message
+                        self.effective_user = query.from_user
+                
+                fake_update = FakeUpdate(query)
+                await self.handle_crisis(fake_update, "mood check indicates crisis")
+            elif mood_level in ['bad', 'okay']:
+                await query.edit_message_text(
+                    f"Thanks for checking in. I hear that you're struggling right now. That takes courage to share. Would you like to try a coping skill or just talk about what's going on? 💙"
+                )
+            else:
+                await query.edit_message_text(
+                    f"I'm glad to hear you're doing {mood_level}! Thanks for checking in. What's been going well for you today? 🌟"
+                )
+        except Exception as e:
+            logger.error(f"Error processing mood entry: {e}")
     
     async def provide_coping_skill(self, query, skill_type: str):
         """Provide specific coping skills"""
@@ -800,52 +841,95 @@ Be kind to yourself. You deserve comfort and care.
         }
         
         skill_text = skills.get(skill_type, "Coping skill not found.")
-        await query.edit_message_text(skill_text)
+        try:
+            await query.edit_message_text(skill_text)
+        except Exception as e:
+            logger.error(f"Error providing coping skill: {e}")
     
     async def daily_mood_reminder(self):
         """Send daily mood check reminders to active users"""
-        # Implementation for daily reminders
-        pass
+        # Implementation for daily reminders would go here
+        logger.info("Daily mood reminder job executed")
     
     def run(self):
         """Start the teen support bot"""
-        import threading
-        from http.server import HTTPServer, BaseHTTPRequestHandler
-        
-        # Health check server for Render
-        class HealthHandler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(b'Teen Support Bot is running')
+        try:
+            logger.info("🌸 TM-Health Support Bot starting...")
+            print("🌸 TM-Health Support Bot starting...")
             
-            def log_message(self, format, *args):
-                pass
-        
-        def run_server():
-            port = int(os.getenv('PORT', 10000))
-            server = HTTPServer(('0.0.0.0', port), HealthHandler)
-            server.serve_forever()
-        
-        server_thread = threading.Thread(target=run_server, daemon=True)
-        server_thread.start()
-        
-        print("🌸 TM-Health Support Bot starting...")
-        self.app.run_polling()
+            # Start the bot with proper error handling
+            self.app.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=['message', 'callback_query']
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Bot failed to start: {e}")
+            print(f"❌ Bot failed to start: {e}")
+            sys.exit(1)
+
+# Health check server for Render (simplified)
+async def health_check_server(port: int):
+    """Simple HTTP server for health checks"""
+    from aiohttp import web
+    
+    async def health_check(request):
+        return web.Response(text='Teen Support Bot is running', status=200)
+    
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"Health check server started on port {port}")
 
 # Main execution
+async def main():
+    """Main async function"""
+    try:
+        # Validate configuration
+        config = TeenBotConfig()
+        config.validate()
+        
+        # Start health check server
+        port = config.PORT
+        try:
+            import aiohttp
+            asyncio.create_task(health_check_server(port))
+            logger.info(f"✅ Health check server starting on port {port}")
+        except ImportError:
+            logger.warning("⚠️ aiohttp not available - health check server disabled")
+        
+        # Create and run bot
+        bot = TeenSupportBot(
+            config.TELEGRAM_TOKEN,
+            config.DATABASE_URL,
+            config.GEMINI_API_KEY
+        )
+        
+        print("🌟 TM-Health Support Bot ready to help!")
+        logger.info("🌟 TM-Health Support Bot ready to help!")
+        
+        # Run bot
+        bot.run()
+        
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+        print("👋 Bot stopped")
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {e}")
+        print(f"❌ Fatal error: {e}")
+        sys.exit(1)
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    config = TeenBotConfig()
-    config.validate()
-    
-    bot = TeenSupportBot(
-        config.TELEGRAM_TOKEN,
-        config.DATABASE_URL,
-        config.GEMINI_API_KEY
-    )
-    
-    print("🌟 TM-Health Support Bot ready to help!")
-    bot.run()
+    # Run the async main function
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("👋 Bot stopped")
+    except Exception as e:
+        print(f"❌ Failed to start bot: {e}")
+        sys.exit(1)
