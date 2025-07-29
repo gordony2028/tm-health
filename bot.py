@@ -1475,6 +1475,61 @@ I'm here too, but please get professional support right now. Your life has meani
         finally:
             session.close()
 
+    def log_clinical_interaction(self, user_id: int, message: str, response: str, risk_assessment: Dict):
+        session = self.db.get_session()
+        try:
+            # Log as therapeutic session
+            session_data = {
+                'user_input': message,
+                'risk_assessment': risk_assessment,
+                'intervention_provided': self.classify_intervention(response),
+                'clinical_notes': f"Risk level: {risk_assessment['level']}"
+            }
+            
+            therapeutic_session = TherapeuticSession(
+                user_id=user_id,
+                intervention_type=session_data['intervention_provided'],
+                session_data=session_data
+            )
+            session.add(therapeutic_session)
+            
+            # Log crisis alert if needed
+            if risk_assessment['level'] in [RiskLevel.HIGH.value, RiskLevel.IMMINENT.value]:
+                crisis_alert = CrisisAlert(
+                    user_id=user_id,
+                    crisis_type=risk_assessment.get('crisis_type', 'general_distress'),
+                    risk_level=risk_assessment['level'],
+                    assessment_data=risk_assessment,
+                    interventions_provided=[session_data['intervention_provided']]
+                )
+                session.add(crisis_alert)
+            
+            # Update conversation count
+            teen = session.query(TeenUser).filter_by(telegram_id=user_id).first()
+            if teen:
+                teen.total_conversations = (teen.total_conversations or 0) + 1
+            
+            session.commit()
+        except Exception as e:
+            logger.error(f"Error logging clinical interaction: {e}")
+            session.rollback()
+        finally:
+            session.close()
+    
+    def classify_intervention(self, response: str) -> str:
+        response_lower = response.lower()
+        
+        if any(word in response_lower for word in ['5-4-3-2-1', 'grounding', 'mindfulness']):
+            return InterventionType.MINDFULNESS.value
+        elif any(word in response_lower for word in ['thought', 'cognitive', 'challenge', 'evidence']):
+            return InterventionType.CBT.value
+        elif any(word in response_lower for word in ['tipp', 'distress tolerance', 'emotion regulation']):
+            return InterventionType.DBT.value
+        elif any(word in response_lower for word in ['crisis', 'safety', 'emergency']):
+            return InterventionType.CRISIS_INTERVENTION.value
+        else:
+            return InterventionType.PSYCHOEDUCATION.value
+
     async def clinical_assessment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Conduct clinical assessment"""
         keyboard = [
