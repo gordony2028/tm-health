@@ -1,0 +1,851 @@
+# TM-Health - Teen Mental Health Support Bot
+# Focus: Emotional support, coping strategies, and connection to professional help
+
+import os
+import json
+import logging
+import signal
+import sys
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ Google Generative AI not available: {e}")
+    GEMINI_AVAILABLE = False
+    genai = None
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean, Float, BigInteger
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+import asyncio
+
+# Database Models for Teen Support
+Base = declarative_base()
+
+class TeenUser(Base):
+    __tablename__ = 'teen_users'
+    
+    id = Column(Integer, primary_key=True)
+    telegram_id = Column(BigInteger, unique=True, nullable=False)
+    username = Column(String(50))
+    first_name = Column(String(50))
+    age = Column(Integer)  # 13-19 for teens
+    preferred_name = Column(String(50))  # What they want to be called
+    timezone = Column(String(50), default='UTC')
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_active = Column(DateTime, default=datetime.utcnow)
+    total_conversations = Column(Integer, default=0)
+    mood_check_frequency = Column(String(20), default='daily')  # daily, weekly, none
+
+class MoodEntry(Base):
+    __tablename__ = 'mood_entries'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    mood_score = Column(Integer)  # 1-10 scale
+    energy_level = Column(Integer)  # 1-10 scale
+    stress_level = Column(Integer)  # 1-10 scale
+    sleep_quality = Column(Integer)  # 1-10 scale
+    notes = Column(Text)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    triggers = Column(String(200))  # school, family, friends, social_media, etc.
+
+class SupportSession(Base):
+    __tablename__ = 'support_sessions'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    session_type = Column(String(50))  # check_in, crisis_support, coping_skills, goal_setting
+    start_time = Column(DateTime, default=datetime.utcnow)
+    duration_minutes = Column(Integer)
+    topic_tags = Column(String(200))  # anxiety, depression, school_stress, relationships, etc.
+    helpful_rating = Column(Integer)  # 1-5 how helpful was the session
+    notes = Column(Text)
+
+class CrisisAlert(Base):
+    __tablename__ = 'crisis_alerts'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    alert_type = Column(String(50))  # self_harm, suicide_ideation, severe_distress
+    message_content = Column(Text)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    response_provided = Column(Text)
+    follow_up_needed = Column(Boolean, default=True)
+
+class Conversation(Base):
+    __tablename__ = 'conversations'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    message_text = Column(Text)
+    bot_response = Column(Text)
+    emotion_detected = Column(String(100))  # happy, sad, anxious, angry, confused, etc.
+    support_type = Column(String(50))  # validation, coping_strategy, resource, referral
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+# Configuration for Teen Support Bot
+class TeenBotConfig:
+    def __init__(self):
+        self.PORT = int(os.getenv('PORT', 10000))
+        self.TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+        self.GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+        self.DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///tm_health.db')
+        
+        # Crisis intervention settings
+        self.CRISIS_KEYWORDS = [
+            'kill myself', 'end it all', 'suicide', 'self harm', 'cut myself',
+            'hurt myself', 'die', 'worthless', 'hopeless', 'can\'t go on'
+        ]
+        
+        # Emergency resources for Australia
+        self.CRISIS_RESOURCES = {
+            'AU': {
+                'emergency': '000',
+                'lifeline': '13 11 14',
+                'kids_helpline': '1800 55 1800',
+                'beyond_blue': '1300 22 4636',
+                'mensline': '1300 78 99 78',
+                'suicide_callback': '1300 659 467',
+                'crisis_text': 'Text HELLO to 0477 13 11 14'
+            },
+            'INTERNATIONAL': {
+                'resources': 'https://www.iasp.info/resources/Crisis_Centres/'
+            }
+        }
+    
+    def validate(self):
+        if not self.TELEGRAM_TOKEN:
+            print("❌ TELEGRAM_TOKEN not found")
+            sys.exit(1)
+        print("✅ TM-Health Bot configuration validated")
+        return True
+
+# Database Setup
+class TeenSupportDB:
+    def __init__(self, database_url: str):
+        self.engine = create_engine(database_url, pool_pre_ping=True, pool_recycle=300)
+        Base.metadata.create_all(self.engine)
+        self.SessionLocal = sessionmaker(bind=self.engine)
+    
+    def get_session(self) -> Session:
+        return self.SessionLocal()
+    
+    def get_or_create_teen(self, telegram_user) -> TeenUser:
+        session = self.get_session()
+        try:
+            teen = session.query(TeenUser).filter_by(telegram_id=telegram_user.id).first()
+            if not teen:
+                teen = TeenUser(
+                    telegram_id=telegram_user.id,
+                    username=telegram_user.username,
+                    first_name=telegram_user.first_name
+                )
+                session.add(teen)
+                session.commit()
+                session.refresh(teen)
+            else:
+                teen.last_active = datetime.utcnow()
+                session.commit()
+            return teen
+        finally:
+            session.close()
+
+# Teen Mental Health AI Coach
+class TeenMentalHealthCoach:
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key
+        self.enabled = False
+        
+        if GEMINI_AVAILABLE and api_key:
+            try:
+                genai.configure(api_key=api_key)
+                # Try teen-appropriate models
+                model_names = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+                
+                for model_name in model_names:
+                    try:
+                        self.model = genai.GenerativeModel(model_name)
+                        test_response = self.model.generate_content("Say 'ready to help teens'")
+                        if test_response and test_response.text:
+                            self.enabled = True
+                            self.model_name = model_name
+                            print(f"✅ Teen Mental Health AI enabled with {model_name}")
+                            break
+                    except Exception as e:
+                        continue
+                        
+            except Exception as e:
+                print(f"❌ Teen Mental Health AI initialization failed: {e}")
+        
+        self.load_therapeutic_prompts()
+    
+    def load_therapeutic_prompts(self):
+        """Load evidence-based therapeutic approaches for teens"""
+        
+        self.base_prompt = """
+# Teen Mental Health Support AI
+
+You are a compassionate, evidence-based mental health support companion for teenagers (ages 13-19). Your role is to provide emotional support, teach coping skills, and connect teens to professional help when needed.
+
+## Core Principles
+
+**Safety First**: Always prioritize the teen's safety. If you detect crisis language, immediately provide crisis resources and encourage professional help.
+
+**Age-Appropriate**: Use teen-friendly language, understand their world (school, social media, peer pressure, identity development).
+
+**Evidence-Based**: Draw from CBT, DBT skills, mindfulness, and positive psychology techniques appropriate for adolescents.
+
+**Non-Judgmental**: Create a safe space where teens feel heard and validated without judgment.
+
+**Boundaries**: You are a support tool, not a replacement for therapy, medication, or professional mental health care.
+
+## Communication Style
+
+- **Empathetic and warm** but not overly casual
+- **Validate their feelings** - teens' emotions are real and important
+- **Use their language** - understand teen slang and concerns
+- **Be patient** - teens may need time to open up
+- **Encourage agency** - help them find their own solutions when possible
+
+## Core Therapeutic Techniques
+
+### Cognitive Behavioral Therapy (CBT) for Teens
+- Help identify negative thought patterns
+- Teach thought challenging techniques
+- Connect thoughts, feelings, and behaviors
+- Use teen-relevant examples
+
+### Dialectical Behavior Therapy (DBT) Skills
+- **Distress Tolerance**: TIPP, self-soothing, distraction
+- **Emotion Regulation**: PLEASE skills, opposite action
+- **Mindfulness**: 5-4-3-2-1 grounding, breathing exercises
+- **Interpersonal Effectiveness**: DEAR MAN for communication
+
+### Positive Psychology
+- Strengths identification
+- Gratitude practices (teen-appropriate)
+- Meaning-making and purpose
+- Growth mindset
+
+## Crisis Response Protocol
+
+If you detect ANY of these, immediately respond with crisis resources:
+- Suicidal ideation or planning
+- Self-harm statements
+- Expressions of hopelessness with intent
+- Severe emotional distress
+
+Crisis Response Format:
+"I'm really concerned about you right now. Your safety is the most important thing. Please reach out for immediate help:
+- Crisis Text Line: Text HOME to 741741
+- National Suicide Prevention Lifeline: 988
+- Or go to your nearest emergency room
+
+You matter, and there are people who want to help you right now."
+
+## Response Guidelines
+
+### Always Include:
+- Validation of their experience
+- Practical coping strategy or skill
+- Encouragement about their strength/resilience
+- Question to keep conversation going (if appropriate)
+
+### Never Do:
+- Give medical advice or diagnose
+- Minimize their problems ("it's just a phase")
+- Share personal information
+- Make promises you can't keep
+- Rush to "fix" everything
+
+### Encourage Professional Help When:
+- Symptoms interfere with daily functioning
+- Persistent mood changes lasting weeks
+- Substance use concerns
+- Trauma disclosure
+- Family crisis situations
+
+## Teen-Specific Considerations
+
+**School Stress**: Understand academic pressure, social dynamics, bullying, college prep anxiety
+**Identity Development**: Support exploration of identity, sexuality, values, independence
+**Social Media**: Address cyberbullying, comparison, FOMO, digital wellness
+**Family Issues**: Navigate parent-teen conflicts, divorce, family mental health
+**Peer Relationships**: Friendship drama, romantic relationships, social anxiety
+**Body Image**: Address eating concerns, body dysmorphia, sports pressure
+**Substance Use**: Provide education and harm reduction information
+
+Remember: You are a supportive companion on their mental health journey, not their therapist. Your role is to provide coping skills, emotional support, and connection to professional resources when needed.
+        """
+    
+    async def generate_teen_response(self, message: str, user_context: Dict) -> str:
+        """Generate age-appropriate mental health support response"""
+        
+        if not self.enabled:
+            return self.fallback_teen_response(message, user_context)
+        
+        teen = user_context.get('teen')
+        recent_moods = user_context.get('recent_moods', [])
+        session_history = user_context.get('recent_sessions', [])
+        
+        # Build context for teen
+        context_summary = f"""
+## Teen Context:
+- Name: {teen.preferred_name or teen.first_name if teen else 'Friend'}
+- Age: {teen.age if teen and teen.age else 'Teen'}
+- Days using support: {(datetime.utcnow() - teen.created_at).days if teen else 0}
+- Recent conversations: {teen.total_conversations if teen else 0}
+
+## Recent Mood Pattern:
+"""
+        
+        if recent_moods:
+            for mood in recent_moods[:3]:
+                context_summary += f"- Mood: {mood.mood_score}/10, Stress: {mood.stress_level}/10, Energy: {mood.energy_level}/10\n"
+        else:
+            context_summary += "- No recent mood data\n"
+        
+        full_prompt = f"""
+{self.base_prompt}
+
+{context_summary}
+
+## Teen's Message: "{message}"
+
+## Your Response Guidelines:
+1. First, assess if this is a crisis situation requiring immediate resources
+2. Validate their feelings and experience
+3. Provide practical coping strategy or emotional support
+4. Use age-appropriate language and examples
+5. End with engagement (question or gentle encouragement)
+6. Keep response under 200 words
+
+Provide a supportive, therapeutic response:
+        """
+        
+        try:
+            response = await asyncio.to_thread(self.model.generate_content, full_prompt)
+            return response.text.strip() if response and response.text else self.fallback_teen_response(message, user_context)
+        except Exception as e:
+            print(f"Teen Mental Health AI error: {e}")
+            return self.fallback_teen_response(message, user_context)
+    
+    def fallback_teen_response(self, message: str, user_context: Dict) -> str:
+        """Fallback responses for teen support"""
+        teen = user_context.get('teen')
+        name = teen.preferred_name or teen.first_name if teen else "friend"
+        
+        message_lower = message.lower()
+        
+        # Crisis detection
+        crisis_keywords = ['kill myself', 'suicide', 'end it all', 'hurt myself', 'hopeless', 'can\'t go on']
+        if any(keyword in message_lower for keyword in crisis_keywords):
+            return f"""
+I'm really concerned about you right now, {name}. Your safety is the most important thing. Please reach out for immediate help:
+
+🆘 **Lifeline Australia**: 13 11 14
+📱 **Kids Helpline**: 1800 55 1800 (for under 25s)
+💬 **Crisis Text**: Text HELLO to 0477 13 11 14
+🏥 **Or call 000 for emergency services**
+
+You matter, and there are people who want to help you right now. I'm here too, but please get immediate professional support. 💙
+            """
+        
+        # Anxiety responses
+        if any(word in message_lower for word in ['anxious', 'panic', 'worry', 'nervous', 'scared']):
+            return f"I hear that you're feeling anxious, {name}. That's really tough. Try the 5-4-3-2-1 grounding technique: Name 5 things you can see, 4 you can touch, 3 you can hear, 2 you can smell, 1 you can taste. It can help bring you back to the present moment. What's making you feel most anxious right now? 🌸"
+        
+        # Depression responses  
+        if any(word in message_lower for word in ['sad', 'depressed', 'empty', 'lonely', 'worthless']):
+            return f"I'm sorry you're feeling this way, {name}. Those feelings are really hard to carry. Remember that feelings, even really painful ones, do change over time. One small thing that sometimes helps is doing something kind for yourself - maybe listening to a favorite song or taking a warm shower. What's one tiny thing that usually brings you even a little comfort? 💜"
+        
+        # School stress
+        if any(word in message_lower for word in ['school', 'homework', 'test', 'grades', 'college']):
+            return f"School stress is so real, {name}. You're dealing with a lot of pressure. Remember that your worth isn't determined by your grades or achievements. Try breaking big tasks into smaller chunks - even 15 minutes of work is progress. What's the most stressful part of school for you right now? 📚"
+        
+        # General support
+        return f"Thanks for sharing with me, {name}. It takes courage to reach out when you're struggling. I'm here to listen and support you. Remember that it's okay to not be okay sometimes - that's part of being human. What's been on your mind lately? 🌟"
+    
+    def detect_crisis(self, message: str) -> bool:
+        """Detect if message indicates mental health crisis"""
+        crisis_indicators = [
+            'kill myself', 'suicide', 'end it all', 'hurt myself', 'cut myself',
+            'don\'t want to live', 'better off dead', 'hopeless', 'can\'t go on',
+            'nothing matters', 'want to die'
+        ]
+        
+        message_lower = message.lower()
+        return any(indicator in message_lower for indicator in crisis_indicators)
+
+# Main Teen Support Bot
+class TeenSupportBot:
+    def __init__(self, token: str, database_url: str, gemini_api_key: str = None):
+        self.db = TeenSupportDB(database_url)
+        self.app = Application.builder().token(token).build()
+        self.ai_coach = TeenMentalHealthCoach(gemini_api_key)
+        self.config = TeenBotConfig()
+        self.setup_handlers()
+        self.setup_scheduler()
+    
+    def setup_handlers(self):
+        # Commands
+        self.app.add_handler(CommandHandler("start", self.start_command))
+        self.app.add_handler(CommandHandler("mood", self.mood_check))
+        self.app.add_handler(CommandHandler("breathe", self.breathing_exercise))
+        self.app.add_handler(CommandHandler("skills", self.coping_skills))
+        self.app.add_handler(CommandHandler("crisis", self.crisis_resources))
+        self.app.add_handler(CommandHandler("about", self.about_me))
+        self.app.add_handler(CommandHandler("privacy", self.privacy_info))
+        
+        # Message handlers
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        self.app.add_handler(CallbackQueryHandler(self.button_callback))
+    
+    def setup_scheduler(self):
+        # Daily mood check reminders
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(
+            self.daily_mood_reminder,
+            CronTrigger(hour=19, minute=0),  # 7 PM daily
+            id='mood_reminder'
+        )
+        scheduler.start()
+    
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        teen = self.db.get_or_create_teen(update.effective_user)
+        
+        welcome_msg = f"""
+Hi {teen.first_name}! 🌟 I'm TM-Health, your personal mental health support companion.
+
+**What I'm here for:**
+• Listen without judgment when you need to talk
+• Teach you coping skills for stress, anxiety, and difficult emotions
+• Help you track your mood and identify patterns
+• Connect you with professional help when needed
+• Be a safe space during tough times
+
+**Important:** I'm here to support you, but I'm not a replacement for therapy or professional help. If you're in crisis, please reach out to a trusted adult or crisis helpline immediately.
+
+**Commands to try:**
+/mood - Quick mood check-in
+/breathe - Guided breathing exercise
+/skills - Learn coping strategies
+/crisis - Emergency resources
+/about - Tell me about yourself
+
+What's on your mind today? I'm here to listen. 💙
+        """
+        
+        await update.message.reply_text(welcome_msg)
+    
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        message_text = update.message.text
+        
+        # Ensure teen exists in database
+        teen = self.db.get_or_create_teen(update.effective_user)
+        
+        # Get user context for AI
+        user_context = self.get_teen_context(user_id)
+        
+        # Crisis detection
+        if self.ai_coach.detect_crisis(message_text):
+            await self.handle_crisis(update, message_text)
+            return
+        
+        # Generate supportive response
+        response = await self.ai_coach.generate_teen_response(message_text, user_context)
+        
+        # Log conversation
+        self.log_conversation(user_id, message_text, response)
+        
+        await update.message.reply_text(response)
+    
+    def get_teen_context(self, user_id: int) -> Dict:
+        session = self.db.get_session()
+        try:
+            teen = session.query(TeenUser).filter_by(telegram_id=user_id).first()
+            recent_moods = session.query(MoodEntry).filter_by(
+                user_id=user_id
+            ).order_by(MoodEntry.timestamp.desc()).limit(7).all()
+            
+            recent_sessions = session.query(SupportSession).filter_by(
+                user_id=user_id
+            ).order_by(SupportSession.start_time.desc()).limit(5).all()
+            
+            return {
+                'teen': teen,
+                'recent_moods': recent_moods,
+                'recent_sessions': recent_sessions
+            }
+        finally:
+            session.close()
+    
+    def log_conversation(self, user_id: int, message: str, response: str):
+        session = self.db.get_session()
+        try:
+            conversation = Conversation(
+                user_id=user_id,
+                message_text=message,
+                bot_response=response,
+                emotion_detected=self.detect_emotion(message),
+                support_type=self.classify_support_type(response)
+            )
+            session.add(conversation)
+            
+            # Update teen's conversation count
+            teen = session.query(TeenUser).filter_by(telegram_id=user_id).first()
+            if teen:
+                teen.total_conversations = (teen.total_conversations or 0) + 1
+            
+            session.commit()
+        finally:
+            session.close()
+    
+    def detect_emotion(self, message: str) -> str:
+        """Simple emotion detection based on keywords"""
+        message_lower = message.lower()
+        
+        if any(word in message_lower for word in ['happy', 'excited', 'good', 'great', 'awesome']):
+            return 'positive'
+        elif any(word in message_lower for word in ['sad', 'depressed', 'down', 'upset']):
+            return 'sad'
+        elif any(word in message_lower for word in ['anxious', 'worried', 'nervous', 'panic']):
+            return 'anxious'
+        elif any(word in message_lower for word in ['angry', 'mad', 'furious', 'annoyed']):
+            return 'angry'
+        else:
+            return 'neutral'
+    
+    def classify_support_type(self, response: str) -> str:
+        """Classify the type of support provided"""
+        response_lower = response.lower()
+        
+        if 'crisis' in response_lower or '988' in response_lower:
+            return 'crisis_intervention'
+        elif any(word in response_lower for word in ['breathing', 'grounding', 'mindfulness']):
+            return 'coping_skills'
+        elif any(word in response_lower for word in ['understand', 'hear you', 'valid']):
+            return 'validation'
+        elif 'therapist' in response_lower or 'counselor' in response_lower:
+            return 'professional_referral'
+        else:
+            return 'general_support'
+    
+    async def handle_crisis(self, update: Update, message: str):
+        """Handle crisis situations with immediate resources"""
+        user_id = update.effective_user.id
+        
+        # Log crisis alert
+        session = self.db.get_session()
+        try:
+            alert = CrisisAlert(
+                user_id=user_id,
+                alert_type='crisis_detected',
+                message_content=message,
+                response_provided='crisis_resources_sent'
+            )
+            session.add(alert)
+            session.commit()
+        finally:
+            session.close()
+        
+        crisis_msg = """
+🚨 **I'm really concerned about you right now. Your safety is the most important thing.**
+
+**Please reach out for immediate help:**
+
+📞 **Lifeline Australia: 13 11 14** (24/7)
+🧒 **Kids Helpline: 1800 55 1800** (for under 25s, 24/7)
+💬 **Crisis Text: Text HELLO to 0477 13 11 14**
+🌐 **Beyond Blue: 1300 22 4636** (24/7)
+
+**If you're in immediate danger, please:**
+• Call 000 (emergency services)
+• Go to your nearest hospital emergency department
+• Tell a trusted adult right now
+
+**You matter. You are valued. There are people who want to help you.**
+
+I'm here too, but please get professional support right now. Your life has meaning and things can get better. 💙
+
+Would you like me to help you think of a trusted adult you could reach out to?
+        """
+        
+        await update.message.reply_text(crisis_msg)
+    
+    async def mood_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Quick mood check-in"""
+        keyboard = [
+            [InlineKeyboardButton("😊 Great (8-10)", callback_data="mood_great")],
+            [InlineKeyboardButton("😌 Good (6-7)", callback_data="mood_good")],
+            [InlineKeyboardButton("😐 Okay (4-5)", callback_data="mood_okay")],
+            [InlineKeyboardButton("😔 Not good (2-3)", callback_data="mood_bad")],
+            [InlineKeyboardButton("😞 Really struggling (1)", callback_data="mood_crisis")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "How are you feeling right now? 💙",
+            reply_markup=reply_markup
+        )
+    
+    async def breathing_exercise(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Guided breathing exercise"""
+        breathing_msg = """
+🌸 **Let's do a quick breathing exercise together**
+
+Find a comfortable position and follow along:
+
+1. **Breathe in slowly through your nose for 4 counts**
+   1... 2... 3... 4...
+
+2. **Hold your breath for 4 counts**
+   1... 2... 3... 4...
+
+3. **Breathe out slowly through your mouth for 6 counts**
+   1... 2... 3... 4... 5... 6...
+
+**Repeat this 3-5 times.**
+
+Notice how your body feels. You've got this! 💙
+
+How do you feel after the breathing exercise?
+        """
+        
+        await update.message.reply_text(breathing_msg)
+    
+    async def coping_skills(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Provide coping skills menu"""
+        keyboard = [
+            [InlineKeyboardButton("🌸 Grounding (5-4-3-2-1)", callback_data="skill_grounding")],
+            [InlineKeyboardButton("🌊 Breathing exercises", callback_data="skill_breathing")],
+            [InlineKeyboardButton("💭 Thought challenging", callback_data="skill_thoughts")],
+            [InlineKeyboardButton("🎵 Distraction techniques", callback_data="skill_distraction")],
+            [InlineKeyboardButton("💜 Self-soothing", callback_data="skill_soothing")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "What kind of coping skill would help you right now? 🌟",
+            reply_markup=reply_markup
+        )
+    
+    async def crisis_resources(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Provide crisis resources"""
+        resources_msg = """
+🆘 **Crisis Resources Australia - You're Not Alone**
+
+**If you're having thoughts of suicide or self-harm:**
+
+📞 **Lifeline Australia**
+   • Call: **13 11 14**
+   • Available 24/7
+   • Free and confidential
+
+🧒 **Kids Helpline**
+   • Call: **1800 55 1800**
+   • For people aged 5-25
+   • Available 24/7
+
+💬 **Crisis Text Support**
+   • Text: **HELLO to 0477 13 11 14**
+   • Available 6PM - midnight AEST
+
+🌐 **Beyond Blue**
+   • Call: **1300 22 4636**
+   • Available 24/7
+   • Chat online: beyondblue.org.au
+
+👨 **MensLine Australia** (for males)
+   • Call: **1300 78 99 78**
+   • Available 24/7
+
+🌐 **Online Chat**
+   • lifeline.org.au
+   • beyondblue.org.au
+   • kidshelpline.com.au
+
+**Remember:**
+• You matter and your life has value
+• Crisis feelings are temporary
+• Help is always available
+• You don't have to go through this alone
+
+If you're in immediate danger, call 000 or go to your nearest hospital emergency department.
+
+How are you feeling right now? I'm here to support you. 💙
+        """
+        
+        await update.message.reply_text(resources_msg)
+    
+    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle button callbacks"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data.startswith("mood_"):
+            mood_level = query.data.replace("mood_", "")
+            await self.process_mood_entry(query, mood_level)
+        elif query.data.startswith("skill_"):
+            skill_type = query.data.replace("skill_", "")
+            await self.provide_coping_skill(query, skill_type)
+    
+    async def process_mood_entry(self, query, mood_level: str):
+        """Process mood check-in response"""
+        user_id = query.from_user.id
+        
+        mood_scores = {
+            'great': 9, 'good': 6, 'okay': 4, 'bad': 2, 'crisis': 1
+        }
+        
+        mood_score = mood_scores.get(mood_level, 5)
+        
+        # Save mood to database
+        session = self.db.get_session()
+        try:
+            mood_entry = MoodEntry(
+                user_id=user_id,
+                mood_score=mood_score
+            )
+            session.add(mood_entry)
+            session.commit()
+        finally:
+            session.close()
+        
+        if mood_level == 'crisis':
+            await query.edit_message_text(
+                "I'm concerned about you. Let's get you some immediate support."
+            )
+            await self.handle_crisis(query, "mood check indicates crisis")
+        elif mood_level in ['bad', 'okay']:
+            await query.edit_message_text(
+                f"Thanks for checking in. I hear that you're struggling right now. That takes courage to share. Would you like to try a coping skill or just talk about what's going on? 💙"
+            )
+        else:
+            await query.edit_message_text(
+                f"I'm glad to hear you're doing {mood_level}! Thanks for checking in. What's been going well for you today? 🌟"
+            )
+    
+    async def provide_coping_skill(self, query, skill_type: str):
+        """Provide specific coping skills"""
+        skills = {
+            'grounding': """
+🌸 **5-4-3-2-1 Grounding Technique**
+
+Look around and name:
+• **5 things you can SEE**
+• **4 things you can TOUCH**
+• **3 things you can HEAR**
+• **2 things you can SMELL**
+• **1 thing you can TASTE**
+
+This helps bring you back to the present moment when you feel overwhelmed or anxious. Take your time with each step.
+            """,
+            'breathing': """
+🌊 **Box Breathing**
+
+• Breathe in for 4 counts
+• Hold for 4 counts  
+• Breathe out for 4 counts
+• Hold empty for 4 counts
+
+Repeat 4-6 times. Imagine drawing a box with your breath.
+            """,
+            'thoughts': """
+💭 **Thought Challenging**
+
+When you notice a negative thought, ask:
+• Is this thought helpful?
+• Is it definitely true?
+• What would I tell a friend having this thought?
+• What's a more balanced way to think about this?
+
+Remember: Thoughts are not facts. You don't have to believe every thought you have.
+            """,
+            'distraction': """
+🎵 **Healthy Distractions**
+
+• Listen to your favorite playlist
+• Watch funny videos
+• Do a puzzle or word game
+• Draw, color, or create something
+• Take a hot shower
+• Text a friend
+• Go for a walk
+
+The goal is to give your mind a break from difficult feelings.
+            """,
+            'soothing': """
+💜 **Self-Soothing Ideas**
+
+• Hold a warm cup of tea
+• Wrap yourself in a soft blanket
+• Use a calming scent (candle, lotion)
+• Pet an animal
+• Take a warm bath
+• Listen to calming music
+• Look at photos that make you smile
+
+Be kind to yourself. You deserve comfort and care.
+            """
+        }
+        
+        skill_text = skills.get(skill_type, "Coping skill not found.")
+        await query.edit_message_text(skill_text)
+    
+    async def daily_mood_reminder(self):
+        """Send daily mood check reminders to active users"""
+        # Implementation for daily reminders
+        pass
+    
+    def run(self):
+        """Start the teen support bot"""
+        import threading
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        
+        # Health check server for Render
+        class HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'Teen Support Bot is running')
+            
+            def log_message(self, format, *args):
+                pass
+        
+        def run_server():
+            port = int(os.getenv('PORT', 10000))
+            server = HTTPServer(('0.0.0.0', port), HealthHandler)
+            server.serve_forever()
+        
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        
+        print("🌸 TM-Health Support Bot starting...")
+        self.app.run_polling()
+
+# Main execution
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    
+    config = TeenBotConfig()
+    config.validate()
+    
+    bot = TeenSupportBot(
+        config.TELEGRAM_TOKEN,
+        config.DATABASE_URL,
+        config.GEMINI_API_KEY
+    )
+    
+    print("🌟 TM-Health Support Bot ready to help!")
+    bot.run()

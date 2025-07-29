@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: tm-health
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python tm_health_bot.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        value: sqlite:///tm_health.db
+      - key: PYTHON_VERSION
+        value: 3.11.0
+    # FREE TIER - Zero monthly costs
+    plan: free
+    region: ohio
+    autoDeploy: true
