@@ -1272,6 +1272,101 @@ Just message me anytime you want to talk - I'm here to provide professional-leve
         """
         
         await update.message.reply_text(help_msg)
+
+    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle button callbacks"""
+        try:
+            query = update.callback_query
+            await query.answer()
+            
+            if query.data.startswith("assess_"):
+                await self.handle_assessment_callback(query)
+            elif query.data.startswith("safety_"):
+                await self.handle_safety_callback(query)
+            elif query.data.startswith("cbt_"):
+                await self.handle_cbt_callback(query)
+            elif query.data.startswith("dbt_"):
+                await self.handle_dbt_callback(query)
+            elif query.data.startswith("crisis_"):
+                await self.handle_crisis_callback(query)
+            elif query.data.startswith("mood_"):
+                await self.handle_mood_callback(query)
+                
+        except Exception as e:
+            logger.error(f"Error in button_callback: {e}")
+
+    async def handle_mood_callback(self, query):
+        """Handle mood tracking callbacks"""
+        if query.data == "mood_quick":
+            await query.edit_message_text(
+                """📝 **Quick Mood Check**
+
+Rate how you're feeling right now on a scale of 1-10:
+
+**Mood:** How is your overall mood?
+1 = Very depressed/down
+10 = Very happy/positive
+
+Choose your current mood level:"""
+            )
+        elif query.data == "mood_detailed":
+            await query.edit_message_text(
+                """📋 **Detailed Mood Assessment**
+
+This comprehensive tracking covers multiple areas of your mental health:
+
+• Overall mood (1-10)
+• Anxiety level (1-10)  
+• Depression indicators (1-10)
+• Energy level (1-10)
+• Stress level (1-10)
+• Sleep quality (1-10)
+• Appetite (1-10)
+
+Plus questions about:
+• Specific triggers
+• Coping skills you've used
+• Any concerning thoughts
+
+This takes about 5 minutes but provides valuable insights for tracking your mental health patterns.
+
+Ready to begin the detailed assessment?"""
+            )
+        elif query.data == "mood_trends":
+            await query.edit_message_text(
+                """📈 **Your Mood Trends**
+
+*Feature coming soon - this will show:*
+
+• Mood patterns over time
+• Correlation between sleep and mood
+• Trigger identification
+• Effectiveness of coping skills
+• Recommendations for improvement
+
+For now, regular mood tracking helps establish baseline patterns that you can discuss with mental health professionals."""
+            )
+        elif query.data == "mood_goals":
+            await query.edit_message_text(
+                """🎯 **Mood Tracking Goals**
+
+Set personalized goals for your mental health:
+
+**Tracking Frequency Options:**
+• Daily check-ins (most comprehensive data)
+• Every other day (balanced approach)
+• Weekly summaries (less overwhelming)
+• As-needed (during difficult periods)
+
+**Focus Areas:**
+• Mood stability
+• Anxiety management  
+• Sleep improvement
+• Stress reduction
+• Identifying triggers
+
+What feels like a realistic tracking goal for you right now?"""
+            )
         """Handle button callbacks"""
         try:
             query = update.callback_query
