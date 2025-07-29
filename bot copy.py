@@ -80,19 +80,8 @@ class InterventionType(Enum):
     SAFETY_PLANNING = "safety_planning"
     PSYCHOEDUCATION = "psychoeducation"
 
-# Enhanced Database Models with Conversation State
+# Enhanced Database Models
 Base = declarative_base()
-
-class ConversationState(Base):
-    __tablename__ = 'conversation_states'
-    
-    id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger, unique=True, nullable=False)
-    state_type = Column(String(50))  # 'assessment', 'safety_plan', 'cbt_session', etc.
-    current_step = Column(Integer, default=0)
-    state_data = Column(JSON)  # Store assessment answers, progress, etc.
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
 
 class TeenUser(Base):
     __tablename__ = 'teen_users'
@@ -277,51 +266,6 @@ class ProfessionalDB:
     
     def get_session(self) -> Session:
         return self.SessionLocal()
-    
-    def get_conversation_state(self, user_id: int) -> Optional['ConversationState']:
-        """Get current conversation state for user"""
-        session = self.get_session()
-        try:
-            return session.query(ConversationState).filter_by(user_id=user_id).first()
-        finally:
-            session.close()
-    
-    def set_conversation_state(self, user_id: int, state_type: str, step: int = 0, data: Dict = None):
-        """Set conversation state for user"""
-        session = self.get_session()
-        try:
-            state = session.query(ConversationState).filter_by(user_id=user_id).first()
-            if state:
-                state.state_type = state_type
-                state.current_step = step
-                state.state_data = data or {}
-                state.updated_at = datetime.utcnow()
-            else:
-                state = ConversationState(
-                    user_id=user_id,
-                    state_type=state_type,
-                    current_step=step,
-                    state_data=data or {}
-                )
-                session.add(state)
-            session.commit()
-        except Exception as e:
-            logger.error(f"Error setting conversation state: {e}")
-            session.rollback()
-        finally:
-            session.close()
-    
-    def clear_conversation_state(self, user_id: int):
-        """Clear conversation state for user"""
-        session = self.get_session()
-        try:
-            session.query(ConversationState).filter_by(user_id=user_id).delete()
-            session.commit()
-        except Exception as e:
-            logger.error(f"Error clearing conversation state: {e}")
-            session.rollback()
-        finally:
-            session.close()
     
     def get_or_create_teen(self, telegram_user) -> TeenUser:
         session = self.get_session()
@@ -853,7 +797,7 @@ class ProfessionalTeenSupportBot:
             raise
     
     def setup_handlers(self):
-        # Commands
+        # Core commands
         self.app.add_handler(CommandHandler("start", self.start_command))
         self.app.add_handler(CommandHandler("assess", self.clinical_assessment))
         self.app.add_handler(CommandHandler("safety", self.safety_planning))
@@ -863,7 +807,6 @@ class ProfessionalTeenSupportBot:
         self.app.add_handler(CommandHandler("crisis", self.crisis_resources))
         self.app.add_handler(CommandHandler("professional", self.professional_resources))
         self.app.add_handler(CommandHandler("help", self.help_command))
-        self.app.add_handler(CommandHandler("cancel", self.cancel_command))  # Cancel any active assessment
         
         # Message handlers
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
@@ -931,27 +874,7 @@ How are you feeling today? I'm here to provide professional-level support. 💙
             message_text = update.message.text
             
             teen = self.db.get_or_create_teen(update.effective_user)
-            
-            # Check if user is in the middle of an assessment or other process
-            conversation_state = self.db.get_conversation_state(user_id)
-            
-            if conversation_state:
-                # Route to appropriate handler based on state
-                if conversation_state.state_type == 'assessment':
-                    await self.handle_assessment_response(update, conversation_state)
-                    return
-                elif conversation_state.state_type == 'safety_plan':
-                    await self.handle_safety_plan_response(update, conversation_state)
-                    return
-                # Add other state handlers as needed
-            
-            # Normal message processing (no active assessment)
             user_context = self.get_clinical_context(user_id)
-            
-            # Crisis detection
-            if self.ai_coach.detect_crisis(message_text):
-                await self.handle_crisis(update, message_text)
-                return
             
             # Generate professional response with risk assessment
             response, risk_assessment = await self.ai_coach.generate_professional_response(message_text, user_context)
@@ -980,404 +903,7 @@ How are you feeling today? I'm here to provide professional-level support. 💙
             logger.error(f"Error in handle_message: {e}")
             await update.message.reply_text("I'm having a technical issue. If this is urgent, please call Lifeline: 13 11 14")
     
-    async def handle_assessment_response(self, update: Update, conversation_state):
-        """Handle responses during active assessments"""
-        user_id = update.effective_user.id
-        message_text = update.message.text.strip()
-        
-        assessment_type = conversation_state.state_data.get('assessment_type')
-        current_step = conversation_state.current_step
-        answers = conversation_state.state_data.get('answers', [])
-        
-        # Validate response (should be 0-3 for most assessments)
-        try:
-            if assessment_type in ['phq_a', 'gad_7']:
-                score = int(message_text)
-                if score not in [0, 1, 2, 3]:
-                    await update.message.reply_text(
-                        "Please respond with a number from 0-3:\n"
-                        "0 = Not at all\n"
-                        "1 = Several days\n" 
-                        "2 = More than half the days\n"
-                        "3 = Nearly every day"
-                    )
-                    return
-            elif assessment_type == 'risk':
-                # Risk assessment might have yes/no or scale responses
-                response = message_text.lower()
-                if response not in ['yes', 'no', 'y', 'n'] and not response.isdigit():
-                    await update.message.reply_text("Please respond with 'yes' or 'no'")
-                    return
-                score = response
-        except ValueError:
-            await update.message.reply_text("Please respond with a valid number (0-3) or yes/no as appropriate.")
-            return
-        
-        # Store the answer
-        answers.append({'question': current_step, 'score': score})
-        
-        # Move to next question or complete assessment
-        next_step = current_step + 1
-        
-        if assessment_type == 'phq_a':
-            await self.continue_phq_assessment(update, next_step, answers, user_id)
-        elif assessment_type == 'gad_7':
-            await self.continue_gad_assessment(update, next_step, answers, user_id)
-        elif assessment_type == 'risk':
-            await self.continue_risk_assessment(update, next_step, answers, user_id)
-
-    async def continue_phq_assessment(self, update: Update, step: int, answers: List, user_id: int):
-        """Continue PHQ-A depression assessment"""
-        questions = [
-            "Little interest or pleasure in doing things",
-            "Feeling down, depressed, or hopeless",
-            "Trouble falling or staying asleep, or sleeping too much", 
-            "Feeling tired or having little energy",
-            "Poor appetite or overeating",
-            "Feeling bad about yourself or that you are a failure or have let yourself or your family down",
-            "Trouble concentrating on things, such as reading the newspaper or watching television",
-            "Moving or speaking so slowly that other people could have noticed. Or the opposite - being so fidgety or restless that you have been moving around a lot more than usual",
-            "Thoughts that you would be better off dead, or of hurting yourself in some way"
-        ]
-        
-        if step < len(questions):
-            # Continue assessment
-            self.db.set_conversation_state(
-                user_id, 
-                'assessment', 
-                step, 
-                {'assessment_type': 'phq_a', 'answers': answers}
-            )
-            
-            await update.message.reply_text(
-                f"**Question {step + 1} of {len(questions)}:**\n\n"
-                f'"{questions[step]}"\n\n'
-                f"Over the past 2 weeks, how often have you been bothered by this?\n\n"
-                f"0 = Not at all\n"
-                f"1 = Several days\n"
-                f"2 = More than half the days\n" 
-                f"3 = Nearly every day"
-            )
-        else:
-            # Assessment complete
-            await self.complete_phq_assessment(update, answers, user_id)
-
-    async def continue_gad_assessment(self, update: Update, step: int, answers: List, user_id: int):
-        """Continue GAD-7 anxiety assessment"""
-        questions = [
-            "Feeling nervous, anxious, or on edge",
-            "Not being able to stop or control worrying",
-            "Worrying too much about different things",
-            "Trouble relaxing", 
-            "Being so restless that it is hard to sit still",
-            "Becoming easily annoyed or irritable",
-            "Feeling afraid, as if something awful might happen"
-        ]
-        
-        if step < len(questions):
-            self.db.set_conversation_state(
-                user_id,
-                'assessment',
-                step,
-                {'assessment_type': 'gad_7', 'answers': answers}
-            )
-            
-            await update.message.reply_text(
-                f"**Question {step + 1} of {len(questions)}:**\n\n"
-                f'"{questions[step]}"\n\n'
-                f"Over the past 2 weeks, how often have you been bothered by this?\n\n"
-                f"0 = Not at all\n"
-                f"1 = Several days\n"
-                f"2 = More than half the days\n"
-                f"3 = Nearly every day"
-            )
-        else:
-            await self.complete_gad_assessment(update, answers, user_id)
-
-    async def continue_risk_assessment(self, update: Update, step: int, answers: List, user_id: int):
-        """Continue risk assessment"""
-        questions = [
-            "In the past month, have you had thoughts that you would be better off dead or of hurting yourself in some way?",
-            "Have you actually had any thoughts of killing yourself?",
-            "If yes, have you thought about how you might do this?",
-            "Have you had these thoughts and had some intention of acting on them?",
-            "Have you started to work out or worked out the details of how to kill yourself?"
-        ]
-        
-        # Skip subsequent questions if previous answers were "no"
-        if step > 0 and answers[-1]['score'] in ['no', 'n']:
-            await self.complete_risk_assessment(update, answers, user_id)
-            return
-            
-        if step < len(questions):
-            self.db.set_conversation_state(
-                user_id,
-                'assessment', 
-                step,
-                {'assessment_type': 'risk', 'answers': answers}
-            )
-            
-            await update.message.reply_text(
-                f"**Risk Assessment - Question {step + 1}:**\n\n"
-                f'"{questions[step]}"\n\n'
-                f"Please respond with 'yes' or 'no'"
-            )
-        else:
-            await self.complete_risk_assessment(update, answers, user_id)
-
-    async def complete_phq_assessment(self, update: Update, answers: List, user_id: int):
-        """Complete and score PHQ-A assessment"""
-        total_score = sum(int(answer['score']) for answer in answers)
-        
-        # PHQ-A scoring
-        if total_score <= 4:
-            severity = "Minimal depression"
-            recommendation = "Your responses suggest minimal symptoms of depression. Continue with healthy habits and self-care."
-        elif total_score <= 9:
-            severity = "Mild depression" 
-            recommendation = "Your responses suggest mild depression symptoms. Consider speaking with a counselor or your GP about support options."
-        elif total_score <= 14:
-            severity = "Moderate depression"
-            recommendation = "Your responses suggest moderate depression. I recommend speaking with a mental health professional for support and possible treatment."
-        elif total_score <= 19:
-            severity = "Moderately severe depression"
-            recommendation = "Your responses suggest moderately severe depression. Please consider seeing a mental health professional soon for evaluation and treatment."
-        else:
-            severity = "Severe depression"
-            recommendation = "Your responses suggest severe depression. Please see a mental health professional as soon as possible for evaluation and treatment."
-        
-        # Save assessment results
-        self.save_assessment_results(user_id, 'PHQ-A', {'total_score': total_score, 'severity': severity}, answers)
-        
-        # Clear conversation state
-        self.db.clear_conversation_state(user_id)
-        
-        results_msg = f"""
-📋 **PHQ-A Depression Assessment Results**
-
-**Your Score:** {total_score}/27
-**Severity Level:** {severity}
-
-**Clinical Interpretation:**
-{recommendation}
-
-**Next Steps:**
-• Continue regular self-care and coping strategies
-• Consider professional support if symptoms persist
-• Use /safety to create a safety plan if needed
-• Contact crisis support if you have thoughts of self-harm
-
-**Professional Resources:**
-• GP for Mental Health Care Plan
-• Headspace (12-25 years): headspace.org.au
-• Kids Helpline: 1800 55 1800
-
-Remember: This is a screening tool, not a diagnosis. Professional evaluation provides the most accurate assessment.
-        """
-        
-        await update.message.reply_text(results_msg)
-        
-        # Offer follow-up based on severity
-        if total_score >= 10:
-            keyboard = [
-                [InlineKeyboardButton("🛡️ Create Safety Plan", callback_data="safety_start")],
-                [InlineKeyboardButton("🏥 Find Professional Help", callback_data="resources_local")],
-                [InlineKeyboardButton("🆘 Crisis Resources", callback_data="crisis_numbers")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text("Would you like additional support?", reply_markup=reply_markup)
-
-    async def complete_gad_assessment(self, update: Update, answers: List, user_id: int):
-        """Complete and score GAD-7 assessment"""
-        total_score = sum(int(answer['score']) for answer in answers)
-        
-        # GAD-7 scoring
-        if total_score <= 4:
-            severity = "Minimal anxiety"
-            recommendation = "Your responses suggest minimal anxiety symptoms. Continue with current coping strategies."
-        elif total_score <= 9:
-            severity = "Mild anxiety"
-            recommendation = "Your responses suggest mild anxiety. Consider learning anxiety management techniques and speaking with a counselor if symptoms persist."
-        elif total_score <= 14:
-            severity = "Moderate anxiety"
-            recommendation = "Your responses suggest moderate anxiety. I recommend speaking with a mental health professional for anxiety management strategies."
-        else:
-            severity = "Severe anxiety"
-            recommendation = "Your responses suggest severe anxiety. Please consider seeing a mental health professional for evaluation and treatment."
-        
-        self.save_assessment_results(user_id, 'GAD-7', {'total_score': total_score, 'severity': severity}, answers)
-        self.db.clear_conversation_state(user_id)
-        
-        results_msg = f"""
-📋 **GAD-7 Anxiety Assessment Results**
-
-**Your Score:** {total_score}/21
-**Severity Level:** {severity}
-
-**Clinical Interpretation:**
-{recommendation}
-
-**Anxiety Management Resources:**
-• /dbt for distress tolerance skills
-• /cbt for anxiety-specific techniques  
-• Breathing exercises and mindfulness
-
-**Professional Support:**
-• GP for Mental Health Care Plan
-• Anxiety-specific therapy (CBT)
-• Headspace or local counseling services
-
-This is a screening tool. Professional evaluation provides personalized treatment recommendations.
-        """
-        
-        await update.message.reply_text(results_msg)
-
-    async def complete_risk_assessment(self, update: Update, answers: List, user_id: int):
-        """Complete risk assessment with appropriate intervention"""
-        # Analyze risk level based on answers
-        risk_level = "low"
-        has_ideation = False
-        has_plan = False
-        
-        for answer in answers:
-            if answer['score'] in ['yes', 'y']:
-                if answer['question'] == 0:  # Better off dead thoughts
-                    risk_level = "moderate"
-                elif answer['question'] == 1:  # Suicide thoughts
-                    has_ideation = True
-                    risk_level = "high"
-                elif answer['question'] >= 2:  # Plan or intent
-                    has_plan = True
-                    risk_level = "imminent"
-        
-        self.save_assessment_results(user_id, 'Risk Assessment', {'risk_level': risk_level, 'ideation': has_ideation, 'plan': has_plan}, answers)
-        self.db.clear_conversation_state(user_id)
-        
-        if risk_level == "imminent":
-            await update.message.reply_text(
-                """🚨 **IMMEDIATE SAFETY CONCERN**
-
-Based on your responses, I'm very concerned about your immediate safety. You've indicated thoughts and possibly plans for suicide.
-
-**PLEASE TAKE ACTION NOW:**
-📞 **Call 000** if you're in immediate danger
-📞 **Lifeline: 13 11 14** (24/7 crisis support)
-📞 **Kids Helpline: 1800 55 1800** (24/7)
-
-**Your safety is the absolute priority right now.**
-
-Please reach out to one of these services immediately or go to your nearest hospital emergency department."""
-            )
-        elif risk_level == "high":
-            await update.message.reply_text(
-                """⚠️ **HIGH RISK IDENTIFIED**
-
-Your responses indicate significant suicide risk. This is serious and I want to help you stay safe.
-
-**Immediate Support:**
-📞 **Lifeline: 13 11 14** (24/7)
-📞 **Kids Helpline: 1800 55 1800** (24/7)
-
-**Please:**
-• Contact one of these services today
-• Tell a trusted adult how you're feeling
-• Consider creating a safety plan
-
-You don't have to go through this alone. Professional help is available."""
-            )
-            
-            keyboard = [
-                [InlineKeyboardButton("🛡️ Create Safety Plan Now", callback_data="safety_start")],
-                [InlineKeyboardButton("📞 Crisis Numbers", callback_data="crisis_numbers")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text("Let's get you additional support:", reply_markup=reply_markup)
-        else:
-            await update.message.reply_text(
-                """✅ **Risk Assessment Complete**
-
-Your responses suggest lower immediate risk, which is positive. However, if you ever start having thoughts of suicide or self-harm, please reach out for help immediately.
-
-**Always Available:**
-📞 Lifeline: 13 11 14
-📞 Kids Helpline: 1800 55 1800
-
-Remember: Thoughts of suicide are a sign that you're experiencing significant emotional pain, not a character flaw. Help is always available."""
-            )
-
-    def save_assessment_results(self, user_id: int, assessment_type: str, scores: Dict, raw_answers: List):
-        """Save assessment results to database"""
-        session = self.db.get_session()
-        try:
-            assessment = ClinicalAssessment(
-                user_id=user_id,
-                assessment_type=assessment_type,
-                scores=scores,
-                recommendations=[],  # Could add automated recommendations
-                timestamp=datetime.utcnow()
-            )
-            session.add(assessment)
-            session.commit()
-            logger.info(f"Saved {assessment_type} results for user {user_id}: {scores}")
-        except Exception as e:
-            logger.error(f"Error saving assessment results: {e}")
-            session.rollback()
-        finally:
-            session.close()
-
-    async def handle_safety_plan_response(self, update: Update, conversation_state):
-        """Handle responses during safety plan creation"""
-        # Placeholder for safety plan conversation flow
-        user_id = update.effective_user.id
-        message_text = update.message.text
-        
-        # For now, just acknowledge and clear state
-        self.db.clear_conversation_state(user_id)
-        await update.message.reply_text("Safety plan creation is in development. Thank you for your input.")
-
-    async def handle_crisis(self, update: Update, message: str):
-        """Enhanced crisis handling that clears any active assessments"""
-        user_id = update.effective_user.id
-        
-        # Clear any active conversation state during crisis
-        self.db.clear_conversation_state(user_id)
-        
-        # Log crisis alert
-        session = self.db.get_session()
-        try:
-            alert = CrisisAlert(
-                user_id=user_id,
-                crisis_type='crisis_detected',
-                risk_level='high',
-                assessment_data={'trigger_message': message},
-                interventions_provided=['crisis_resources_sent']
-            )
-            session.add(alert)
-            session.commit()
-        finally:
-            session.close()
-        
-        crisis_msg = """
-🚨 **I'm really concerned about you right now. Your safety is the most important thing.**
-
-**Please reach out for immediate help:**
-
-📞 **Lifeline Australia: 13 11 14** (24/7)
-🧒 **Kids Helpline: 1800 55 1800** (for under 25s, 24/7)
-💬 **Crisis Text: Text HELLO to 0477 13 11 14**
-🌐 **Beyond Blue: 1300 22 4636** (24/7)
-
-**If you're in immediate danger, please:**
-• Call 000 (emergency services)
-• Go to your nearest hospital emergency department
-• Tell a trusted adult right now
-
-**You matter. You are valued. There are people who want to help you.**
-
-I'm here too, but please get professional support right now. Your life has meaning and things can get better. 💙
-        """
-        
-        await update.message.reply_text(crisis_msg)
+    def get_clinical_context(self, user_id: int) -> Dict:
         session = self.db.get_session()
         try:
             teen = session.query(TeenUser).filter_by(telegram_id=user_id).first()
@@ -1709,7 +1235,6 @@ How are you feeling right now? I'm here to support you. 💙
 **Core Commands:**
 /start - Welcome and professional introduction
 /help - Show this help menu
-/cancel - Cancel any active assessment or process
 
 **Clinical Tools:**
 /assess - Mental health screening (PHQ-A, GAD-7, risk assessment)
@@ -1727,13 +1252,9 @@ How are you feeling right now? I'm here to support you. 💙
 **Features:**
 • **Evidence-based interventions** using CBT, DBT, ACT frameworks
 • **Clinical assessment tools** used by mental health professionals  
-• **Interactive assessments** that guide you through each question
 • **Personalized safety planning** for crisis management
 • **Professional resource directory** for ongoing care
 • **Risk assessment and monitoring** for your safety
-
-**During Assessments:**
-When you start an assessment (like /assess), I'll guide you through each question. Simply respond with the number or answer requested. Use /cancel anytime to stop an assessment.
 
 **Professional Boundaries:**
 I provide evidence-based mental health support and coping skills, but I am NOT a replacement for:
@@ -1751,22 +1272,6 @@ Just message me anytime you want to talk - I'm here to provide professional-leve
         """
         
         await update.message.reply_text(help_msg)
-
-    async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Cancel any active assessment or process"""
-        user_id = update.effective_user.id
-        conversation_state = self.db.get_conversation_state(user_id)
-        
-        if conversation_state:
-            state_type = conversation_state.state_type
-            self.db.clear_conversation_state(user_id)
-            await update.message.reply_text(
-                f"✅ Cancelled your active {state_type}. You can start a new assessment anytime with /assess or get help with /help"
-            )
-        else:
-            await update.message.reply_text(
-                "No active assessment to cancel. Use /assess to start a clinical assessment or /help for other options."
-            )
 
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle button callbacks"""
@@ -1883,17 +1388,7 @@ What feels like a realistic tracking goal for you right now?"""
 
     async def handle_assessment_callback(self, query):
         """Handle clinical assessment callbacks"""
-        user_id = query.from_user.id
-        
         if query.data == "assess_depression":
-            # Start PHQ-A assessment
-            self.db.set_conversation_state(
-                user_id, 
-                'assessment', 
-                0, 
-                {'assessment_type': 'phq_a', 'answers': []}
-            )
-            
             await query.edit_message_text(
                 """📋 **Depression Screening (PHQ-A)**
 
@@ -1907,21 +1402,14 @@ Over the last 2 weeks, how often have you been bothered by the following problem
 2 = More than half the days
 3 = Nearly every day
 
+Let's start with the first question:
+
 **Question 1 of 9:**
 "Little interest or pleasure in doing things"
 
-How would you rate this over the past 2 weeks? (Respond with 0, 1, 2, or 3)"""
+How would you rate this over the past 2 weeks?"""
             )
-            
         elif query.data == "assess_anxiety":
-            # Start GAD-7 assessment
-            self.db.set_conversation_state(
-                user_id,
-                'assessment',
-                0,
-                {'assessment_type': 'gad_7', 'answers': []}
-            )
-            
             await query.edit_message_text(
                 """📋 **Anxiety Screening (GAD-7)**
 
@@ -1938,18 +1426,9 @@ Over the last 2 weeks, how often have you been bothered by:
 **Question 1 of 7:**
 "Feeling nervous, anxious, or on edge"
 
-How would you rate this over the past 2 weeks? (Respond with 0, 1, 2, or 3)"""
+How would you rate this over the past 2 weeks?"""
             )
-            
         elif query.data == "assess_risk":
-            # Start risk assessment
-            self.db.set_conversation_state(
-                user_id,
-                'assessment',
-                0,
-                {'assessment_type': 'risk', 'answers': []}
-            )
-            
             await query.edit_message_text(
                 """🛡️ **Risk Assessment**
 
@@ -1960,9 +1439,8 @@ This confidential assessment helps ensure your safety and connect you with appro
 **Question 1:**
 In the past month, have you had thoughts that you would be better off dead or of hurting yourself in some way?
 
-Please respond with 'yes' or 'no'"""
+Please respond honestly - your safety is the priority."""
             )
-            
         elif query.data == "assess_complete":
             await query.edit_message_text(
                 """📊 **Complete Wellness Assessment**
@@ -1979,17 +1457,8 @@ This comprehensive assessment combines multiple clinical tools:
 
 This provides a thorough understanding of your current wellbeing and helps identify specific areas where support might be helpful.
 
-Which assessment would you like to start with?"""
+Ready to begin the complete assessment?"""
             )
-            
-            # Provide options to start individual assessments
-            keyboard = [
-                [InlineKeyboardButton("Start with Depression Screening", callback_data="assess_depression")],
-                [InlineKeyboardButton("Start with Anxiety Screening", callback_data="assess_anxiety")],
-                [InlineKeyboardButton("Start with Risk Assessment", callback_data="assess_risk")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.message.reply_text("Choose your starting assessment:", reply_markup=reply_markup)
 
     async def handle_safety_callback(self, query):
         """Handle safety planning callbacks"""
